@@ -1,45 +1,44 @@
-import collections
-import json
 import asyncio
+import base64
+import collections
 import datetime
+import difflib
+import json
+import mimetypes
 import random
 import re
-import difflib
-import base64
-import mimetypes
 import traceback
-from typing import Any, cast
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, cast
 
 import jieba
-from langchain_core.prompts import ChatPromptTemplate
-from nonebot import require, get_bot, get_plugin_config
-from pydantic import Field, BaseModel, SecretStr, field_validator
-from simpleeval import simple_eval
-from sqlalchemy import Select, func, extract, desc
-
-from nonebot.log import logger
-from langchain.tools import ToolRuntime, tool
 from langchain.agents import create_agent
+from langchain.agents.structured_output import ToolStrategy
+from langchain.tools import ToolRuntime, tool
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from langchain_tavily import TavilySearch
+from nonebot import get_bot, get_plugin_config, require
+from nonebot.log import logger
 from nonebot_plugin_alconna import UniMessage
-from nonebot_plugin_uninfo import SceneType, QryItrface
 from nonebot_plugin_orm import get_session
+from nonebot_plugin_uninfo import QryItrface, SceneType
+from pydantic import BaseModel, Field, SecretStr, field_validator
+from simpleeval import simple_eval
+from sqlalchemy import Select, desc, extract, func
 from sqlalchemy.orm.session import Session
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain.agents.structured_output import ToolStrategy
 
 try:
     from langchain.agents.middleware import ToolCallLimitMiddleware
 except Exception:
     ToolCallLimitMiddleware = None
 
-from ..model import ChatHistory, MediaStorage, UserRelation, ChatHistorySchema, GroupMemory
 from ..config import Config
 from ..favorability import apply_favorability_change_detailed
 from ..memory import DB
+from ..model import ChatHistory, ChatHistorySchema, GroupMemory, MediaStorage, UserRelation
 from ..reply_guard import is_request_active
 from .voice_tool import create_voice_tool, get_voice_supported_text_langs, is_voice_service_healthy
 
@@ -64,6 +63,120 @@ else:
 class Context:
     session_id: str
     request_id: str | None = None
+
+
+@dataclass(frozen=True)
+class EmojiLike:
+    id: str
+    meaning: str
+
+
+EMOJI_LIKES = [
+    EmojiLike("4", "得意"),
+    EmojiLike("5", "流泪"),
+    EmojiLike("8", "睡"),
+    EmojiLike("9", "大哭"),
+    EmojiLike("10", "尴尬"),
+    EmojiLike("12", "调皮"),
+    EmojiLike("14", "微笑"),
+    EmojiLike("16", "酷"),
+    EmojiLike("21", "可爱"),
+    EmojiLike("23", "傲慢"),
+    EmojiLike("24", "饥饿"),
+    EmojiLike("25", "困"),
+    EmojiLike("30", "奋斗"),
+    EmojiLike("32", "疑问"),
+    EmojiLike("39", "再见"),
+    EmojiLike("42", "爱情"),
+    EmojiLike("49", "拥抱"),
+    EmojiLike("53", "蛋糕"),
+    EmojiLike("60", "咖啡"),
+    EmojiLike("63", "玫瑰"),
+    EmojiLike("66", "爱心"),
+    EmojiLike("74", "太阳"),
+    EmojiLike("76", "赞"),
+    EmojiLike("78", "握手"),
+    EmojiLike("79", "胜利"),
+    EmojiLike("85", "飞吻"),
+    EmojiLike("89", "西瓜"),
+    EmojiLike("96", "冷汗"),
+    EmojiLike("99", "鼓掌"),
+    EmojiLike("111", "可怜"),
+    EmojiLike("116", "示爱"),
+    EmojiLike("118", "抱拳"),
+    EmojiLike("120", "拳头"),
+    EmojiLike("122", "爱你"),
+    EmojiLike("123", "NO"),
+    EmojiLike("124", "OK"),
+    EmojiLike("144", "喝彩"),
+    EmojiLike("147", "棒棒糖"),
+    EmojiLike("171", "茶"),
+    EmojiLike("173", "泪奔"),
+    EmojiLike("174", "无奈"),
+    EmojiLike("175", "卖萌"),
+    EmojiLike("176", "小纠结"),
+    EmojiLike("179", "doge"),
+    EmojiLike("180", "惊喜"),
+    EmojiLike("181", "戳一戳"),
+    EmojiLike("182", "笑哭"),
+    EmojiLike("183", "我最美"),
+    EmojiLike("201", "点赞"),
+    EmojiLike("212", "托腮"),
+    EmojiLike("214", "啵啵"),
+    EmojiLike("222", "抱抱"),
+    EmojiLike("227", "拍手"),
+]
+EMOJI_LIKE_BY_ID = {emoji.id: emoji for emoji in EMOJI_LIKES}
+EMOJI_LIKE_BY_MEANING = {emoji.meaning: emoji for emoji in EMOJI_LIKES}
+EMOJI_LIKE_ALIASES = {
+    "like": "点赞",
+    "thumb": "点赞",
+    "thumbs": "点赞",
+    "thumbsup": "点赞",
+    "点赞": "点赞",
+    "点个赞": "点赞",
+    "赞同": "点赞",
+    "认可": "点赞",
+    "支持": "点赞",
+    "赞": "赞",
+    "ok": "OK",
+    "okay": "OK",
+    "可以": "OK",
+    "好": "OK",
+    "笑": "笑哭",
+    "哈哈": "笑哭",
+    "好笑": "笑哭",
+    "笑死": "笑哭",
+    "乐": "笑哭",
+    "乐了": "笑哭",
+    "绷": "笑哭",
+    "疑惑": "疑问",
+    "问号": "疑问",
+    "不懂": "疑问",
+    "迷惑": "疑问",
+    "鼓励": "鼓掌",
+    "鼓掌": "鼓掌",
+    "拍手": "拍手",
+    "喝彩": "喝彩",
+    "加油": "奋斗",
+    "努力": "奋斗",
+    "安慰": "抱抱",
+    "抱": "抱抱",
+    "抱抱": "抱抱",
+    "拥抱": "拥抱",
+    "可怜": "可怜",
+    "心疼": "可怜",
+    "爱": "爱心",
+    "喜欢": "爱心",
+    "爱心": "爱心",
+    "惊讶": "惊喜",
+    "惊喜": "惊喜",
+    "无语": "无奈",
+    "无奈": "无奈",
+    "尴尬": "尴尬",
+    "doge": "doge",
+}
+DEFAULT_EMOJI_LIKE = EMOJI_LIKE_BY_MEANING["点赞"]
 
 
 class ResponseMessage(BaseModel):
@@ -978,6 +1091,109 @@ def calculate_expression(expression: str) -> str:
         return f"计算失败。请检查表达式是否正确，错误信息: {e}"
 
 
+def _resolve_emoji_like(emoji_name: str | None) -> EmojiLike:
+    raw_name = str(emoji_name or "").strip()
+    if not raw_name:
+        return DEFAULT_EMOJI_LIKE
+
+    if raw_name in EMOJI_LIKE_BY_ID:
+        return EMOJI_LIKE_BY_ID[raw_name]
+    if raw_name in EMOJI_LIKE_BY_MEANING:
+        return EMOJI_LIKE_BY_MEANING[raw_name]
+
+    normalized = raw_name.lower().strip("/[]()（） ")
+    alias = EMOJI_LIKE_ALIASES.get(normalized) or EMOJI_LIKE_ALIASES.get(raw_name)
+    if alias:
+        return EMOJI_LIKE_BY_MEANING.get(alias, DEFAULT_EMOJI_LIKE)
+
+    for emoji in EMOJI_LIKES:
+        if normalized and normalized in emoji.meaning.lower():
+            return emoji
+
+    return DEFAULT_EMOJI_LIKE
+
+
+def _extract_message_id_text(raw: str | None) -> str | None:
+    text = str(raw or "").strip()
+    match = re.search(r"\d+", text)
+    return match.group() if match else None
+
+
+def create_emoji_like_tool(
+    session_id: str,
+    request_id: str | None,
+    bot_id: str | None,
+    allowed_message_ids: set[str] | None = None,
+):
+    """创建消息评论表情工具。"""
+
+    @tool("add_message_emoji_like")
+    async def add_message_emoji_like(
+        target_msg_id: str,
+        emoji_name: str | None = None,
+        reason: str | None = None,
+    ) -> str:
+        """
+        给当前群聊中的一条消息添加 QQ/NapCat 评论表情。
+        这是可选的轻量反应工具，不会发送新消息。
+
+        参数:
+        - target_msg_id: 目标消息 id，必须来自当前 prompt 中出现的消息 id。
+        - emoji_name: 可选，表情含义，如 点赞、赞、OK、笑哭、doge、疑问、鼓掌、抱抱、爱心。
+        - reason: 可选，为什么给这条消息添加这个评论表情。
+        """
+        if request_id is not None and not await is_request_active(session_id, request_id):
+            return "请求已过期，已取消评论表情。"
+        if not bot_id:
+            return "无法获取 bot ID，评论表情失败。"
+
+        message_id_text = _extract_message_id_text(target_msg_id)
+        if message_id_text is None:
+            return f"评论表情失败: 无法从 target_msg_id 中提取有效数字: {target_msg_id!r}"
+        if allowed_message_ids is not None and message_id_text not in allowed_message_ids:
+            return "评论表情失败: target_msg_id 不在本轮可评论表情候选消息里。"
+
+        message_id = int(message_id_text)
+
+        emoji = _resolve_emoji_like(emoji_name)
+
+        try:
+            bot = get_bot(bot_id)
+            if not hasattr(bot, "call_api"):
+                return "当前适配器不支持评论表情功能。"
+
+            if request_id is not None and not await is_request_active(session_id, request_id):
+                return "请求已过期，已取消评论表情。"
+
+            await bot.call_api(
+                "set_msg_emoji_like",
+                message_id=message_id,
+                emoji_id=emoji.id,
+                set=True,
+            )
+            logger.info(
+                "评论表情成功: session_id=%s message_id=%s emoji_id=%s emoji_name=%s reason=%s",
+                session_id,
+                message_id,
+                emoji.id,
+                emoji.meaning,
+                reason or "",
+            )
+            return f"已给消息 {message_id} 添加评论表情“{emoji.meaning}”。"
+        except Exception as e:
+            logger.warning(
+                "评论表情失败: session_id=%s message_id=%s emoji_id=%s emoji_name=%s error=%s",
+                session_id,
+                message_id,
+                emoji.id,
+                emoji.meaning,
+                e,
+            )
+            return f"评论表情失败: {type(e).__name__}: {e}"
+
+    return add_message_emoji_like
+
+
 def create_mute_tool(
     session_id: str,
     request_id: str | None,
@@ -1431,6 +1647,83 @@ def _parse_msg_meta(content: str) -> tuple[str | None, str | None, str]:
     return own_id, reply_to_id, body
 
 
+def _build_emoji_like_candidates(history: list[ChatHistorySchema], max_items: int = 6) -> str:
+    selected: list[tuple[str, str, str]] = []
+    seen_ids: set[str] = set()
+
+    for msg in reversed(history):
+        if msg.content_type == "bot":
+            continue
+
+        raw_msg_id, _, body = _parse_msg_meta(msg.content)
+        msg_id = _extract_message_id_text(raw_msg_id)
+        if not msg_id or msg_id in seen_ids:
+            continue
+
+        seen_ids.add(msg_id)
+        display_name = _strip_role_prefix(msg.user_name)
+        if msg.content_type == "image":
+            snippet = "[图片]"
+            if body and body != "[图片]":
+                snippet = f"[图片] {body}"
+        else:
+            snippet = re.sub(r"\s+", " ", body).strip()
+
+        if not snippet:
+            snippet = "[空消息]"
+        if len(snippet) > 80:
+            snippet = snippet[:77] + "..."
+
+        selected.append((msg_id, display_name, snippet))
+        if len(selected) >= max_items:
+            break
+
+    if not selected:
+        return ""
+
+    selected.reverse()
+    candidates = [
+        f"{index}. msg_id={msg_id} {display_name}: {snippet}"
+        for index, (msg_id, display_name, snippet) in enumerate(selected, 1)
+    ]
+    lines = [
+        "【可添加评论表情的最近消息】",
+        "以下消息可以作为 `add_message_emoji_like` 的 target_msg_id。只有确实合适时才调用。",
+        *candidates,
+    ]
+    return "\n".join(lines)
+
+
+def _collect_emoji_like_candidate_ids(history: list[ChatHistorySchema], max_items: int = 6) -> set[str]:
+    candidate_ids: list[str] = []
+    seen_ids: set[str] = set()
+
+    for msg in reversed(history):
+        if msg.content_type == "bot":
+            continue
+
+        raw_msg_id, _, _ = _parse_msg_meta(msg.content)
+        msg_id = _extract_message_id_text(raw_msg_id)
+        if not msg_id or msg_id in seen_ids:
+            continue
+
+        seen_ids.add(msg_id)
+        candidate_ids.append(msg_id)
+        if len(candidate_ids) >= max_items:
+            break
+
+    return set(candidate_ids)
+
+
+def _collect_bound_message_ids(bound_messages: list[dict[str, str]] | None) -> set[str]:
+    candidate_ids: set[str] = set()
+    for item in bound_messages or []:
+        msg_id = _extract_message_id_text(item.get("msg_id"))
+        if msg_id:
+            candidate_ids.add(msg_id)
+    return candidate_ids
+
+
 async def create_chat_agent(
     db_session,
     session_id: str,
@@ -1441,6 +1734,7 @@ async def create_chat_agent(
     interface: QryItrface | None = None,
     role_map: dict[str, str] | None = None,
     bot_id: str | None = None,
+    emoji_like_candidate_ids: set[str] | None = None,
 ):
     """创建聊天 Agent。"""
     relation_context = await get_user_relation_context(db_session, user_id, user_name)
@@ -1449,6 +1743,8 @@ async def create_chat_agent(
     has_admin_permission = False
     voice_tool_available = await is_voice_service_healthy(plugin_config)
     voice_supported_text_langs = get_voice_supported_text_langs(plugin_config)
+    if emoji_like_candidate_ids is None:
+        emoji_like_candidate_ids = _collect_emoji_like_candidate_ids(history or [])
     if interface is not None and bot_id:
         try:
             members = await interface.get_members(SceneType.GROUP, session_id)
@@ -1539,6 +1835,15 @@ async def create_chat_agent(
 - 只能通过工具发消息，不要直接输出正文
 - 文本：`reply_user`
 - 表情包：先 `search_meme_image` 或 `search_similar_meme_by_id`，再 `send_meme_image`
+- 评论表情：可选使用 `add_message_emoji_like`
+  - 当你觉得某条消息适合轻量回应时，可以给它添加一个评论表情
+  - 这是附加反应，不是必须；没有特别合适的消息就不要调用
+  - 优先给【当前触发消息】或【本轮回复引用的消息】添加
+  - `target_msg_id` 必须来自本轮 prompt 中出现的消息 id，不要猜
+  - 不要为了完成任务硬贴表情，不要连续乱贴；每轮最多调用一次
+  - 选择表情时按语义匹配，例如：赞同/认可用“点赞/赞/OK”，好笑用“笑哭/doge/调皮”，疑惑用“疑问”
+  - 鼓励用“鼓掌/喝彩/奋斗”，安慰用“抱抱/拥抱/可怜”
+  - 如果 `add_message_emoji_like` 返回失败，不要假装成功；通常也不用专门解释
 - 外部知识、缩写、术语：优先 `search_web`
 - 群内上下文：`search_history_context`
 - 用户情绪或关系变化明显时，调用 `update_user_impression`
@@ -1563,6 +1868,12 @@ async def create_chat_agent(
     send_meme_tool = create_send_meme_tool(session_id, request_id)
     relation_tool = create_relation_tool(session_id, request_id, user_id, user_name)
     similar_meme_tool = create_similar_meme_tool(session_id, request_id, user_id)
+    emoji_like_tool = create_emoji_like_tool(
+        session_id,
+        request_id,
+        bot_id,
+        emoji_like_candidate_ids,
+    )
     voice_tool = (
         create_voice_tool(session_id, request_id, plugin_config, plugin_config.bot_name)
         if voice_tool_available
@@ -1585,6 +1896,7 @@ async def create_chat_agent(
             search_meme_tool,
             similar_meme_tool,
             send_meme_tool,
+            emoji_like_tool,
             calculate_expression,
             report_tool,
             finish,
@@ -1601,6 +1913,7 @@ async def create_chat_agent(
             search_meme_tool,
             similar_meme_tool,
             send_meme_tool,
+            emoji_like_tool,
             calculate_expression,
             relation_tool,
             report_tool,
@@ -1618,6 +1931,7 @@ async def create_chat_agent(
                 ToolCallLimitMiddleware(run_limit=20),
                 ToolCallLimitMiddleware(tool_name="reply_user", run_limit=1),
                 ToolCallLimitMiddleware(tool_name="send_meme_image", run_limit=1),
+                ToolCallLimitMiddleware(tool_name="add_message_emoji_like", run_limit=1),
             ]
             if voice_tool_available:
                 middleware.append(ToolCallLimitMiddleware(tool_name="send_voice", run_limit=1))
@@ -1809,6 +2123,9 @@ async def choice_response_strategy(
     使用 Agent 决定回复策略。
     """
     try:
+        emoji_like_candidate_ids = _collect_emoji_like_candidate_ids(history)
+        emoji_like_candidate_ids.update(_collect_bound_message_ids(bound_messages))
+
         agent = await create_chat_agent(
             db_session,
             session_id,
@@ -1819,6 +2136,7 @@ async def choice_response_strategy(
             interface,
             role_map,
             bot_id,
+            emoji_like_candidate_ids,
         )
 
         chat_history_messages = await format_chat_history(
@@ -1833,6 +2151,7 @@ async def choice_response_strategy(
 
         latest_user_msg = next((msg for msg in reversed(history) if msg.content_type != "bot"), None)
         focus_notice = ""
+        emoji_like_candidates = _build_emoji_like_candidates(history)
         if latest_user_msg is not None:
             focus_id, focus_reply_id, focus_body = _parse_msg_meta(latest_user_msg.content)
             focus_body = focus_body or ("[图片]" if latest_user_msg.content_type == "image" else "")
@@ -1860,6 +2179,7 @@ async def choice_response_strategy(
 时间: {today.strftime("%Y-%m-%d %H:%M:%S")} {weekdays[today.weekday()]}
 {f"额外设置: {setting}" if setting else ""}
 {focus_notice}
+{emoji_like_candidates}
 
 【任务】
 请根据上述对话历史，判断是否需要回复。如果需要，请调用相应工具。

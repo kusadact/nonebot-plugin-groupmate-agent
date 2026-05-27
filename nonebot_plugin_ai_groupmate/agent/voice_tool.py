@@ -312,7 +312,7 @@ def create_voice_tool(
 
             result = await UniMessage.voice(raw=audio, mimetype="audio/wav", name="voice.wav").send()
             if request_id is not None:
-                await mark_request_sent(session_id, request_id)
+                mark_request_sent(session_id, request_id)
             msg_id = result.msg_ids[-1]["message_id"] if result.msg_ids else "unknown"
             async with get_session() as db_session:
                 chat_history = ChatHistory(

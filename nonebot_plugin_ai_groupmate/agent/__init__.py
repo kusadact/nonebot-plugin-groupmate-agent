@@ -219,7 +219,7 @@ def create_report_tool(
                 if not all_msgs:
                     await UniMessage.text("你今年在这个群好像没怎么说话，生成不了报告哦...").send()
                     if request_id is not None:
-                        await mark_request_sent(session_id, request_id)
+                        mark_request_sent(session_id, request_id)
                     return "用户本群无数据。"
 
                 # 统计与采样
@@ -405,7 +405,7 @@ def create_report_tool(
 
             await UniMessage.text(final_report_text).send()
             if request_id is not None:
-                await mark_request_sent(session_id, request_id)
+                mark_request_sent(session_id, request_id)
 
             return "报告已生成并发送。"
 
@@ -720,7 +720,7 @@ def create_reply_tool(
 
         res = await message.send()
         if request_id is not None:
-            await mark_request_sent(session_id, request_id)
+            mark_request_sent(session_id, request_id)
         msg_id = res.msg_ids[-1]["message_id"] if res.msg_ids else "unknown"
         async with get_session() as db_session:
             chat_history = ChatHistory(
@@ -938,7 +938,7 @@ def create_send_meme_tool(session_id: str, request_id: str | None = None):
 
                 res = await UniMessage.image(raw=pic_data).send()
                 if request_id is not None:
-                    await mark_request_sent(session_id, request_id)
+                    mark_request_sent(session_id, request_id)
                 chat_history = ChatHistory(
                     session_id=session_id,
                     user_id=plugin_config.bot_name,

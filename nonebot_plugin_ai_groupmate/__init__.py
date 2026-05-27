@@ -332,7 +332,7 @@ async def _run_group_reply_worker(group_id: str) -> None:
                                 state.latest = followup_request
             request = None
     except asyncio.CancelledError:
-        if request and request.is_direct and await has_request_sent(group_id, request.request_id):
+        if request and request.is_direct and has_request_sent(group_id, request.request_id):
             async with _group_reply_state_lock:
                 state = _group_reply_states.get(group_id)
                 if state:
@@ -357,7 +357,7 @@ async def _run_group_reply_worker(group_id: str) -> None:
             if state.latest is not None:
                 _start_group_reply_worker_locked(group_id, state)
         for request_id in handled_request_ids:
-            await clear_request_sent(group_id, request_id)
+            clear_request_sent(group_id, request_id)
 
 
 def _extract_model_text(content: Any) -> str:
@@ -1573,15 +1573,11 @@ async def handle_message(
             raw_direct_targets=raw_direct_targets,
         )
         running_request_id: str | None = None
-        running_request_is_direct = False
         async with _group_reply_state_lock:
             reply_state = _group_reply_states.get(group_id)
             if reply_state and reply_state.running:
                 running_request_id = reply_state.running_request_id
-                running_request_is_direct = reply_state.running_request_is_direct
-        running_request_has_sent = (
-            await has_request_sent(group_id, running_request_id) if running_request_id else False
-        )
+        running_request_has_sent = has_request_sent(group_id, running_request_id) if running_request_id else False
         async with _group_reply_state_lock:
             reply_state = _group_reply_states.setdefault(group_id, GroupReplyState())
             if is_direct:
@@ -1592,9 +1588,7 @@ async def handle_message(
             reply_state.latest = request
             if reply_state.running:
                 if reply_state.task and not reply_state.task.done():
-                    can_cancel_running = not running_request_is_direct
-                    if is_direct and running_request_is_direct and running_request_id:
-                        can_cancel_running = not running_request_has_sent
+                    can_cancel_running = not running_request_has_sent
                     if can_cancel_running:
                         reply_state.task.cancel()
                         logger.info(f"群 {group_id} 收到更新请求，已取消旧回复并切换到最新")

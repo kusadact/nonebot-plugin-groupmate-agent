@@ -217,9 +217,9 @@ def create_report_tool(
                 all_msgs = (await db_session.execute(stmt)).scalars().all()
 
                 if not all_msgs:
+                    await UniMessage.text("你今年在这个群好像没怎么说话，生成不了报告哦...").send()
                     if request_id is not None:
                         await mark_request_sent(session_id, request_id)
-                    await UniMessage.text("你今年在这个群好像没怎么说话，生成不了报告哦...").send()
                     return "用户本群无数据。"
 
                 # 统计与采样
@@ -403,9 +403,9 @@ def create_report_tool(
             if request_id is not None and not await is_request_active(session_id, request_id):
                 return "请求已过期，已取消发送。"
 
+            await UniMessage.text(final_report_text).send()
             if request_id is not None:
                 await mark_request_sent(session_id, request_id)
-            await UniMessage.text(final_report_text).send()
 
             return "报告已生成并发送。"
 
@@ -718,9 +718,9 @@ def create_reply_tool(
         if request_id is not None and not await is_request_active(session_id, request_id):
             return "expired"
 
+        res = await message.send()
         if request_id is not None:
             await mark_request_sent(session_id, request_id)
-        res = await message.send()
         msg_id = res.msg_ids[-1]["message_id"] if res.msg_ids else "unknown"
         async with get_session() as db_session:
             chat_history = ChatHistory(
@@ -936,9 +936,9 @@ def create_send_meme_tool(session_id: str, request_id: str | None = None):
                 if request_id is not None and not await is_request_active(session_id, request_id):
                     return "请求已过期，已取消发送。"
 
+                res = await UniMessage.image(raw=pic_data).send()
                 if request_id is not None:
                     await mark_request_sent(session_id, request_id)
-                res = await UniMessage.image(raw=pic_data).send()
                 chat_history = ChatHistory(
                     session_id=session_id,
                     user_id=plugin_config.bot_name,

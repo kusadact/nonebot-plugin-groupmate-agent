@@ -214,7 +214,12 @@ def _build_direct_reply_context(
 
 
 def _select_direct_reply_targets(pending_targets: list[DirectReplyTarget]) -> list[DirectReplyTarget]:
-    return list(reversed(pending_targets))[:_MAX_DIRECT_REPLY_TARGETS]
+    newest_first = list(reversed(pending_targets))
+    if not newest_first:
+        return []
+
+    user_id = newest_first[0].user_id
+    return [target for target in newest_first if target.user_id == user_id][:_MAX_DIRECT_REPLY_TARGETS]
 
 
 def _refresh_direct_request_locked(request: ReplyRequest, state: GroupReplyState) -> None:
@@ -306,6 +311,25 @@ async def _run_group_reply_worker(group_id: str) -> None:
                     state = _group_reply_states.get(group_id)
                     if state:
                         _remove_pending_direct_targets(state, request.direct_targets)
+                        if state.pending_direct_targets and (state.latest is None or not state.latest.is_direct):
+                            followup_request = ReplyRequest(
+                                request_id=f"{group_id}:{datetime.datetime.now().timestamp()}:{random.random()}",
+                                session=request.session,
+                                interface=request.interface,
+                                bot_name=request.bot_name,
+                                bot_id=request.bot_id,
+                                user_id=request.user_id,
+                                user_name=request.user_name,
+                                is_tome=True,
+                                is_direct=True,
+                                bound_messages=[],
+                                bound_images=[],
+                                disable_inline_history_images=False,
+                                binding_notice=None,
+                            )
+                            _refresh_direct_request_locked(followup_request, state)
+                            if followup_request.direct_targets:
+                                state.latest = followup_request
             request = None
     except asyncio.CancelledError:
         if request and request.is_direct and await has_request_sent(group_id, request.request_id):
@@ -1569,7 +1593,7 @@ async def handle_message(
             if reply_state.running:
                 if reply_state.task and not reply_state.task.done():
                     can_cancel_running = not running_request_is_direct
-                    if is_direct and running_request_id:
+                    if is_direct and running_request_is_direct and running_request_id:
                         can_cancel_running = not running_request_has_sent
                     if can_cancel_running:
                         reply_state.task.cancel()

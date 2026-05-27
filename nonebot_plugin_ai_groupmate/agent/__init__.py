@@ -39,7 +39,7 @@ from ..config import Config
 from ..favorability import apply_favorability_change_detailed
 from ..memory import DB
 from ..model import ChatHistory, ChatHistorySchema, GroupMemory, MediaStorage, UserRelation
-from ..reply_guard import is_request_active
+from ..reply_guard import is_request_active, mark_request_sent
 from .emoji_like import EMOJI_LIKE_CATEGORY_PROMPT, create_emoji_like_tool, extract_emoji_like_message_id_text
 from .voice_tool import create_voice_tool, get_voice_supported_text_langs, is_voice_service_healthy
 
@@ -217,6 +217,8 @@ def create_report_tool(
                 all_msgs = (await db_session.execute(stmt)).scalars().all()
 
                 if not all_msgs:
+                    if request_id is not None:
+                        await mark_request_sent(session_id, request_id)
                     await UniMessage.text("你今年在这个群好像没怎么说话，生成不了报告哦...").send()
                     return "用户本群无数据。"
 
@@ -401,6 +403,8 @@ def create_report_tool(
             if request_id is not None and not await is_request_active(session_id, request_id):
                 return "请求已过期，已取消发送。"
 
+            if request_id is not None:
+                await mark_request_sent(session_id, request_id)
             await UniMessage.text(final_report_text).send()
 
             return "报告已生成并发送。"
@@ -532,6 +536,8 @@ def create_reply_tool(
     session_id: str,
     request_id: str | None = None,
     interface: QryItrface | None = None,
+    allow_reply_duplicates: bool = False,
+    check_recent_duplicate: bool = True,
 ):
     """
     核心工具：用于发送消息。
@@ -573,7 +579,7 @@ def create_reply_tool(
         if not normalized_text:
             return []
 
-        deduped_text = _dedupe_consecutive_lines(normalized_text)
+        deduped_text = normalized_text if allow_reply_duplicates else _dedupe_consecutive_lines(normalized_text)
         raw_segments = [line.strip() for line in deduped_text.split("\n") if line.strip()]
         if not raw_segments:
             return []
@@ -584,7 +590,7 @@ def create_reply_tool(
             if not normalized_segment:
                 continue
 
-            if segments:
+            if segments and not allow_reply_duplicates:
                 previous_segment = _normalize_text(segments[-1])
                 if _semantic_similarity(previous_segment, normalized_segment) >= 0.9:
                     continue
@@ -704,7 +710,7 @@ def create_reply_tool(
         if request_id is not None and not await is_request_active(session_id, request_id):
             return "expired"
 
-        if await _is_recent_duplicate(content):
+        if check_recent_duplicate and await _is_recent_duplicate(content):
             return "duplicate"
 
         message = _build_reply_message(content, name_to_id)
@@ -712,6 +718,8 @@ def create_reply_tool(
         if request_id is not None and not await is_request_active(session_id, request_id):
             return "expired"
 
+        if request_id is not None:
+            await mark_request_sent(session_id, request_id)
         res = await message.send()
         msg_id = res.msg_ids[-1]["message_id"] if res.msg_ids else "unknown"
         async with get_session() as db_session:
@@ -928,6 +936,8 @@ def create_send_meme_tool(session_id: str, request_id: str | None = None):
                 if request_id is not None and not await is_request_active(session_id, request_id):
                     return "请求已过期，已取消发送。"
 
+                if request_id is not None:
+                    await mark_request_sent(session_id, request_id)
                 res = await UniMessage.image(raw=pic_data).send()
                 chat_history = ChatHistory(
                     session_id=session_id,
@@ -1519,6 +1529,7 @@ async def create_chat_agent(
     role_map: dict[str, str] | None = None,
     bot_id: str | None = None,
     emoji_like_candidate_ids: set[str] | None = None,
+    direct_targets: list[dict[str, Any]] | None = None,
 ):
     """创建聊天 Agent。"""
     relation_context = await get_user_relation_context(db_session, user_id, user_name)
@@ -1529,6 +1540,8 @@ async def create_chat_agent(
     voice_supported_text_langs = get_voice_supported_text_langs(plugin_config)
     if emoji_like_candidate_ids is None:
         emoji_like_candidate_ids = _collect_emoji_like_candidate_ids(history or [])
+    has_direct_targets = bool(direct_targets)
+    is_multi_direct_reply = len(direct_targets or []) > 1
     if interface is not None and bot_id:
         try:
             members = await interface.get_members(SceneType.GROUP, session_id)
@@ -1610,6 +1623,7 @@ async def create_chat_agent(
 - 不要为了拆句多次调用 `reply_user`
 - 多条回复必须信息递进，后一条必须提供新信息，禁止同义改写重复
 - 如果下一条和上一条语义高度重叠，直接不发下一条
+- 但当本轮提示要求“逐条回复多条消息”时，每一行对应不同消息，不要因为两行语义相近而漏回
 - 可吐槽可玩梗，但不恶意攻击，不无脑迎合
 - 不要复读模板句，不要输出“我脑子一片空白”“我被修坏了”“我不知道我是谁”这类台词
 - 不要使用 emoji，尤其不要用 😅
@@ -1678,7 +1692,13 @@ async def create_chat_agent(
         tools = [
             search_web,
             search_history_context,
-            create_reply_tool(session_id, request_id, interface),
+            create_reply_tool(
+                session_id,
+                request_id,
+                interface,
+                allow_reply_duplicates=is_multi_direct_reply,
+                check_recent_duplicate=not has_direct_targets,
+            ),
             search_meme_tool,
             similar_meme_tool,
             send_meme_tool,
@@ -1695,7 +1715,13 @@ async def create_chat_agent(
         tools = [
             search_web,
             search_history_context,
-            create_reply_tool(session_id, request_id, interface),
+            create_reply_tool(
+                session_id,
+                request_id,
+                interface,
+                allow_reply_duplicates=is_multi_direct_reply,
+                check_recent_duplicate=not has_direct_targets,
+            ),
             search_meme_tool,
             similar_meme_tool,
             send_meme_tool,
@@ -1904,6 +1930,7 @@ async def choice_response_strategy(
     bound_images: list[dict[str, str]] | None = None,
     disable_inline_history_images: bool = False,
     binding_notice: str | None = None,
+    direct_targets: list[dict[str, Any]] | None = None,
 ):
     """
     使用 Agent 决定回复策略。
@@ -1923,6 +1950,7 @@ async def choice_response_strategy(
             role_map,
             bot_id,
             emoji_like_candidate_ids,
+            direct_targets,
         )
 
         chat_history_messages = await format_chat_history(
@@ -1935,10 +1963,42 @@ async def choice_response_strategy(
             binding_notice=binding_notice,
         )
 
+        direct_targets = direct_targets or []
         latest_user_msg = next((msg for msg in reversed(history) if msg.content_type != "bot"), None)
         focus_notice = ""
         emoji_like_candidates = _build_emoji_like_candidates(history)
-        if latest_user_msg is not None:
+        if direct_targets:
+            focus_lines = ["【本轮需要逐条回复的消息】"]
+            for idx, target in enumerate(direct_targets, 1):
+                user_name = (target.get("user_name") or "未知用户").strip()
+                content_type = (target.get("content_type") or "text").strip()
+                message_id = (target.get("message_id") or "未知").strip()
+                reply_to_id = (target.get("reply_to_message_id") or "").strip()
+                text = (target.get("text") or "").strip()
+                focus_lines.append(f"{idx}. 发送者: {user_name}")
+                focus_lines.append(f"   消息类型: {'图片' if content_type == 'image' else '文本'}")
+                focus_lines.append(f"   消息id: {message_id}")
+                if reply_to_id:
+                    focus_lines.append(f"   回复目标id: {reply_to_id}")
+                if text:
+                    focus_lines.append(f"   正文: {text}")
+                bound_target_messages = target.get("bound_messages") or []
+                for bound in bound_target_messages:
+                    bound_user = (bound.get("user_name") or "未知用户").strip()
+                    bound_type = (bound.get("content_type") or "text").strip()
+                    bound_msg_id = (bound.get("msg_id") or "").strip()
+                    bound_text = (bound.get("text") or "").strip()
+                    type_label = "图片消息" if bound_type == "image" else "文本消息"
+                    id_suffix = f" msg_id={bound_msg_id}" if bound_msg_id else ""
+                    focus_lines.append(f"   引用的{type_label}{id_suffix}: {bound_user}: {bound_text}")
+                image_labels = target.get("bound_image_labels") or []
+                if image_labels:
+                    focus_lines.append(f"   相关重点图片: {', '.join(image_labels)}")
+            focus_lines.append("请严格按上面的编号顺序逐条回复，每条回复单独一行。")
+            focus_lines.append("第1行只回复第1条消息，第2行只回复第2条消息，不要合并，不要漏回。")
+            focus_lines.append("如果某条消息信息不足，也要单独用一句话说明。")
+            focus_notice = "\n".join(focus_lines)
+        elif latest_user_msg is not None:
             focus_id, focus_reply_id, focus_body = _parse_msg_meta(latest_user_msg.content)
             focus_body = focus_body or ("[图片]" if latest_user_msg.content_type == "image" else "")
             focus_lines = [

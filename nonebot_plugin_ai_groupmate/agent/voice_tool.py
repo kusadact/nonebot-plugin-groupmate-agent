@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from ..config import ScopedConfig
 from ..model import ChatHistory
-from ..reply_guard import is_request_active
+from ..reply_guard import is_request_active, mark_request_sent
 
 _health_lock = asyncio.Lock()
 _tts_lock = asyncio.Lock()
@@ -310,6 +310,8 @@ def create_voice_tool(
             if not await _is_current_request_active(session_id, request_id):
                 return "请求已过期，已取消发送语音。"
 
+            if request_id is not None:
+                await mark_request_sent(session_id, request_id)
             result = await UniMessage.voice(raw=audio, mimetype="audio/wav", name="voice.wav").send()
             msg_id = result.msg_ids[-1]["message_id"] if result.msg_ids else "unknown"
             async with get_session() as db_session:

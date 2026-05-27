@@ -10,7 +10,7 @@ import urllib.request
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import jieba
 from nonebot import logger, require, on_command, on_message, get_plugin_config, get_driver
@@ -46,7 +46,7 @@ from .utils import (
 )
 from .config import Config
 from .memory import DB
-from .reply_guard import set_latest_request_id
+from .reply_guard import clear_request_sent, has_request_sent, set_latest_request_id
 
 __plugin_meta__ = PluginMetadata(
     name="nonebot-plugin-ai-groupmate",
@@ -66,6 +66,7 @@ with open(Path(__file__).parent / "stop_words.txt", encoding="utf-8") as f:
     stop_words = f.read().splitlines() + ["id", "回复"]
 
 _DEFAULT_DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+_MAX_DIRECT_REPLY_TARGETS = 3
 
 
 class PermanentMultimodalError(Exception):
@@ -106,6 +107,20 @@ multimodal_model = (
 
 
 @dataclass
+class DirectReplyTarget:
+    message_id: str
+    user_id: str
+    user_name: str
+    content_type: str
+    text: str
+    reply_to_message_id: str | None
+    bound_messages: list[dict[str, str]]
+    bound_images: list[dict[str, str]]
+    disable_inline_history_images: bool
+    binding_notice: str | None
+
+
+@dataclass
 class ReplyRequest:
     request_id: str
     session: Uninfo
@@ -115,10 +130,13 @@ class ReplyRequest:
     user_id: str
     user_name: str | None
     is_tome: bool
+    is_direct: bool
     bound_messages: list[dict[str, str]]
     bound_images: list[dict[str, str]]
     disable_inline_history_images: bool
     binding_notice: str | None
+    direct_targets: list[dict[str, Any]] = field(default_factory=list)
+    raw_direct_targets: list[DirectReplyTarget] = field(default_factory=list)
 
 
 @dataclass
@@ -126,10 +144,115 @@ class GroupReplyState:
     running: bool = False
     latest: ReplyRequest | None = None
     task: asyncio.Task | None = None
+    running_request_is_direct: bool = False
+    running_request_id: str | None = None
+    pending_direct_targets: list[DirectReplyTarget] = field(default_factory=list)
 
 
 _group_reply_states: dict[str, GroupReplyState] = {}
 _group_reply_state_lock = asyncio.Lock()
+
+
+def _copy_bound_message(item: dict[str, str], target_index: int) -> dict[str, str]:
+    copied = dict(item)
+    label = (copied.get("label") or "关联消息").strip()
+    copied["label"] = f"目标{target_index}-{label}"
+    return copied
+
+
+def _copy_bound_image(item: dict[str, str], target_index: int) -> dict[str, str]:
+    copied = dict(item)
+    label = (copied.get("label") or "关联图片").strip()
+    copied["label"] = f"目标{target_index}-{label}"
+    return copied
+
+
+def _build_direct_reply_context(
+    pending_targets: list[DirectReplyTarget],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]], list[dict[str, str]], bool, str | None]:
+    selected_targets = _select_direct_reply_targets(pending_targets)
+    direct_targets: list[dict[str, Any]] = []
+    bound_messages: list[dict[str, str]] = []
+    bound_images: list[dict[str, str]] = []
+    binding_notices: list[str] = []
+    disable_inline_history_images = False
+
+    for index, target in enumerate(selected_targets, 1):
+        target_bound_messages = [_copy_bound_message(item, index) for item in target.bound_messages]
+        target_bound_images = [_copy_bound_image(item, index) for item in target.bound_images]
+        image_labels = [
+            (item.get("label") or f"目标{index}-关联图片").strip()
+            for item in target_bound_images
+            if item.get("image_url")
+        ]
+        direct_targets.append(
+            {
+                "message_id": target.message_id,
+                "user_id": target.user_id,
+                "user_name": target.user_name,
+                "content_type": target.content_type,
+                "text": target.text,
+                "reply_to_message_id": target.reply_to_message_id,
+                "bound_messages": target_bound_messages,
+                "bound_image_labels": image_labels,
+            }
+        )
+        bound_messages.extend(target_bound_messages)
+        bound_images.extend(target_bound_images)
+        if target.disable_inline_history_images:
+            disable_inline_history_images = True
+        if target.binding_notice:
+            binding_notices.append(f"目标{index}: {target.binding_notice}")
+
+    return (
+        direct_targets,
+        bound_messages,
+        bound_images,
+        disable_inline_history_images,
+        "\n".join(binding_notices) if binding_notices else None,
+    )
+
+
+def _select_direct_reply_targets(pending_targets: list[DirectReplyTarget]) -> list[DirectReplyTarget]:
+    return list(reversed(pending_targets))[:_MAX_DIRECT_REPLY_TARGETS]
+
+
+def _refresh_direct_request_locked(request: ReplyRequest, state: GroupReplyState) -> None:
+    selected_targets = _select_direct_reply_targets(state.pending_direct_targets)
+    (
+        request.direct_targets,
+        request.bound_messages,
+        request.bound_images,
+        request.disable_inline_history_images,
+        request.binding_notice,
+    ) = _build_direct_reply_context(state.pending_direct_targets)
+    request.raw_direct_targets = selected_targets
+    if selected_targets:
+        newest_target = selected_targets[0]
+        request.user_id = newest_target.user_id
+        request.user_name = newest_target.user_name
+
+
+def _remove_pending_direct_targets(state: GroupReplyState, direct_targets: list[dict[str, Any]]) -> None:
+    processed_ids = {
+        str(item.get("message_id") or "").strip()
+        for item in direct_targets
+        if str(item.get("message_id") or "").strip()
+    }
+    if not processed_ids:
+        return
+    state.pending_direct_targets = [
+        target for target in state.pending_direct_targets if target.message_id not in processed_ids
+    ]
+
+
+def _upsert_pending_direct_target(state: GroupReplyState, target: DirectReplyTarget) -> None:
+    state.pending_direct_targets = [
+        existing for existing in state.pending_direct_targets if existing.message_id != target.message_id
+    ]
+    state.pending_direct_targets.append(target)
+    if len(state.pending_direct_targets) > _MAX_DIRECT_REPLY_TARGETS:
+        state.pending_direct_targets = state.pending_direct_targets[-_MAX_DIRECT_REPLY_TARGETS:]
 
 
 def _start_group_reply_worker_locked(group_id: str, state: GroupReplyState) -> None:
@@ -138,18 +261,29 @@ def _start_group_reply_worker_locked(group_id: str, state: GroupReplyState) -> N
 
 
 async def _run_group_reply_worker(group_id: str) -> None:
+    request: ReplyRequest | None = None
+    handled_request_ids: set[str] = set()
     try:
         while True:
+            request = None
             async with _group_reply_state_lock:
                 state = _group_reply_states.get(group_id)
                 if not state:
                     return
                 request = state.latest
                 state.latest = None
+                if request and request.is_direct:
+                    _refresh_direct_request_locked(request, state)
+                    if not request.direct_targets:
+                        request = None
+                state.running_request_is_direct = bool(request and request.is_direct)
+                state.running_request_id = request.request_id if request else None
 
             if request is None:
                 break
 
+            await set_latest_request_id(group_id, request.request_id)
+            handled_request_ids.add(request.request_id)
             async with get_session() as reply_session:
                 await handle_reply_logic(
                     reply_session,
@@ -165,7 +299,28 @@ async def _run_group_reply_worker(group_id: str) -> None:
                     request.bound_images,
                     request.disable_inline_history_images,
                     request.binding_notice,
+                    request.direct_targets,
                 )
+            if request.is_direct:
+                async with _group_reply_state_lock:
+                    state = _group_reply_states.get(group_id)
+                    if state:
+                        _remove_pending_direct_targets(state, request.direct_targets)
+            request = None
+    except asyncio.CancelledError:
+        if request and request.is_direct and await has_request_sent(group_id, request.request_id):
+            async with _group_reply_state_lock:
+                state = _group_reply_states.get(group_id)
+                if state:
+                    _remove_pending_direct_targets(state, request.direct_targets)
+        elif request and request.is_direct:
+            async with _group_reply_state_lock:
+                state = _group_reply_states.get(group_id)
+                if state:
+                    for target in reversed(request.raw_direct_targets):
+                        if all(existing.message_id != target.message_id for existing in state.pending_direct_targets):
+                            state.pending_direct_targets.insert(0, target)
+        raise
     finally:
         async with _group_reply_state_lock:
             state = _group_reply_states.get(group_id)
@@ -173,8 +328,12 @@ async def _run_group_reply_worker(group_id: str) -> None:
                 return
             state.running = False
             state.task = None
+            state.running_request_is_direct = False
+            state.running_request_id = None
             if state.latest is not None:
                 _start_group_reply_worker_locked(group_id, state)
+        for request_id in handled_request_ids:
+            await clear_request_sent(group_id, request_id)
 
 
 def _extract_model_text(content: Any) -> str:
@@ -1196,7 +1355,8 @@ async def handle_message(
 ):
     """处理消息的主函数"""
     imgs = msg.include(Image)
-    content = f"id: {get_message_id()}\n"
+    current_message_id = str(get_message_id())
+    content = f"id: {current_message_id}\n"
     body = ""
     to_me = False
     is_text = False
@@ -1265,7 +1425,7 @@ async def handle_message(
         logger.error(f"保存文本消息失败: {e}")
         await db_session.rollback()
 
-    image_content_prefix = f"id: {get_message_id()}\n"
+    image_content_prefix = f"id: {current_message_id}\n"
     if reply_to_message_id:
         image_content_prefix += f"回复id: {reply_to_message_id}\n"
     for img in imgs:
@@ -1337,6 +1497,40 @@ async def handle_message(
             group_id,
             reply_to_message_id,
         )
+        direct_targets: list[dict[str, Any]] = []
+        raw_direct_targets: list[DirectReplyTarget] = []
+        is_direct = bool(to_me)
+        if is_direct:
+            current_target = DirectReplyTarget(
+                message_id=current_message_id,
+                user_id=session.user.id,
+                user_name=user_name or session.user.id,
+                content_type="image" if imgs else "text",
+                text=body.strip() or ("[图片]" if imgs else ""),
+                reply_to_message_id=reply_to_message_id,
+                bound_messages=bound_messages,
+                bound_images=bound_images,
+                disable_inline_history_images=disable_inline_history_images,
+                binding_notice=binding_notice,
+            )
+            async with _group_reply_state_lock:
+                reply_state = _group_reply_states.setdefault(group_id, GroupReplyState())
+                _upsert_pending_direct_target(reply_state, current_target)
+                (
+                    direct_targets,
+                    bound_messages,
+                    bound_images,
+                    disable_inline_history_images,
+                    binding_notice,
+                ) = _build_direct_reply_context(reply_state.pending_direct_targets)
+                selected_ids = {
+                    str(item.get("message_id") or "").strip()
+                    for item in direct_targets
+                    if str(item.get("message_id") or "").strip()
+                }
+                raw_direct_targets = [
+                    target for target in reply_state.pending_direct_targets if target.message_id in selected_ids
+                ]
         request = ReplyRequest(
             request_id=f"{group_id}:{datetime.datetime.now().timestamp()}:{random.random()}",
             session=session,
@@ -1346,19 +1540,40 @@ async def handle_message(
             user_id=user_id,
             user_name=user_name,
             is_tome=to_me,
+            is_direct=is_direct,
             bound_messages=bound_messages,
             bound_images=bound_images,
             disable_inline_history_images=disable_inline_history_images,
             binding_notice=binding_notice,
+            direct_targets=direct_targets,
+            raw_direct_targets=raw_direct_targets,
         )
-        await set_latest_request_id(group_id, request.request_id)
+        running_request_id: str | None = None
+        running_request_is_direct = False
+        async with _group_reply_state_lock:
+            reply_state = _group_reply_states.get(group_id)
+            if reply_state and reply_state.running:
+                running_request_id = reply_state.running_request_id
+                running_request_is_direct = reply_state.running_request_is_direct
+        running_request_has_sent = (
+            await has_request_sent(group_id, running_request_id) if running_request_id else False
+        )
         async with _group_reply_state_lock:
             reply_state = _group_reply_states.setdefault(group_id, GroupReplyState())
+            if is_direct:
+                _refresh_direct_request_locked(request, reply_state)
+            if not is_direct and (reply_state.pending_direct_targets or reply_state.running_request_is_direct):
+                logger.debug(f"群 {group_id} 有直接触发待处理，跳过普通概率回复")
+                return
             reply_state.latest = request
             if reply_state.running:
                 if reply_state.task and not reply_state.task.done():
-                    reply_state.task.cancel()
-                    logger.info(f"群 {group_id} 收到更新请求，已取消旧回复并切换到最新")
+                    can_cancel_running = not running_request_is_direct
+                    if is_direct and running_request_id:
+                        can_cancel_running = not running_request_has_sent
+                    if can_cancel_running:
+                        reply_state.task.cancel()
+                        logger.info(f"群 {group_id} 收到更新请求，已取消旧回复并切换到最新")
                 else:
                     logger.warning(
                         f"群 {group_id} 回复状态异常（running=True 但 worker 不可用），已重启并切换到最新请求"
@@ -1499,6 +1714,7 @@ async def handle_reply_logic(
     bound_images: list[dict[str, str]] | None = None,
     disable_inline_history_images: bool = False,
     binding_notice: str | None = None,
+    direct_targets: list[dict[str, Any]] | None = None,
 ):
     """处理回复逻辑"""
     try:
@@ -1596,6 +1812,7 @@ async def handle_reply_logic(
                     bound_images,
                     disable_inline_history_images,
                     binding_notice,
+                    direct_targets,
                 ),
                 timeout=240.0,
             )

@@ -214,12 +214,7 @@ def _build_direct_reply_context(
 
 
 def _select_direct_reply_targets(pending_targets: list[DirectReplyTarget]) -> list[DirectReplyTarget]:
-    newest_first = list(reversed(pending_targets))
-    if not newest_first:
-        return []
-
-    user_id = newest_first[0].user_id
-    return [target for target in newest_first if target.user_id == user_id][:_MAX_DIRECT_REPLY_TARGETS]
+    return list(reversed(pending_targets))[:_MAX_DIRECT_REPLY_TARGETS]
 
 
 def _refresh_direct_request_locked(request: ReplyRequest, state: GroupReplyState) -> None:
@@ -234,8 +229,13 @@ def _refresh_direct_request_locked(request: ReplyRequest, state: GroupReplyState
     request.raw_direct_targets = selected_targets
     if selected_targets:
         newest_target = selected_targets[0]
-        request.user_id = newest_target.user_id
-        request.user_name = newest_target.user_name
+        target_user_ids = {target.user_id for target in selected_targets if target.user_id}
+        if len(target_user_ids) > 1:
+            request.user_id = ""
+            request.user_name = None
+        else:
+            request.user_id = newest_target.user_id
+            request.user_name = newest_target.user_name
 
 
 def _remove_pending_direct_targets(state: GroupReplyState, direct_targets: list[dict[str, Any]]) -> None:

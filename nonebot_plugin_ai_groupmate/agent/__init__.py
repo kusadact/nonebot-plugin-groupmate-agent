@@ -1532,7 +1532,19 @@ async def create_chat_agent(
     direct_targets: list[dict[str, Any]] | None = None,
 ):
     """创建聊天 Agent。"""
-    relation_context = await get_user_relation_context(db_session, user_id, user_name)
+    has_direct_targets = bool(direct_targets)
+    is_multi_direct_reply = len(direct_targets or []) > 1
+    direct_user_ids = {
+        str(target.get("user_id") or "").strip()
+        for target in direct_targets or []
+        if str(target.get("user_id") or "").strip()
+    }
+    is_cross_user_direct_reply = len(direct_user_ids) > 1
+    relation_context = (
+        ""
+        if is_cross_user_direct_reply
+        else await get_user_relation_context(db_session, user_id, user_name)
+    )
     group_context = await get_group_context(db_session, session_id)
     recent_relations_context = await get_recent_relations_context(db_session, history or [])
     has_admin_permission = False
@@ -1540,8 +1552,6 @@ async def create_chat_agent(
     voice_supported_text_langs = get_voice_supported_text_langs(plugin_config)
     if emoji_like_candidate_ids is None:
         emoji_like_candidate_ids = _collect_emoji_like_candidate_ids(history or [])
-    has_direct_targets = bool(direct_targets)
-    is_multi_direct_reply = len(direct_targets or []) > 1
     if interface is not None and bot_id:
         try:
             members = await interface.get_members(SceneType.GROUP, session_id)
@@ -1557,6 +1567,11 @@ async def create_chat_agent(
     permission_status = ""
     mute_tool_instruction = ""
     voice_tool_instruction = ""
+    user_bound_tool_instruction = """- 用户情绪或关系变化明显时，调用 `update_user_impression`
+- 若用户提到“年度报告 / 个人总结 / 成分分析”，直接调用 `generate_and_send_annual_report`；
+  工具完成后只回复“请查收~”，不要复述报告
+"""
+    cross_user_direct_instruction = ""
     if voice_tool_available:
         voice_text_lang_instruction = ""
         voice_default_values_instruction = (
@@ -1589,7 +1604,7 @@ async def create_chat_agent(
   - 只有在用户情绪、语气、演绎需求很明显时，再小幅微调这些参数
   - 如果 `send_voice` 返回失败，不要假装已发送；可以改用 `reply_user` 简短说明
 """
-    if has_admin_permission:
+    if has_admin_permission and not is_cross_user_direct_reply:
         permission_status = """
 【你的权限】
 你在这个群里是管理员或群主，必要时可以使用禁言工具维护秩序。
@@ -1605,6 +1620,12 @@ async def create_chat_agent(
     - 禁言时长应合理：轻微违规 60-300 秒，严重违规可更长
   - 不要禁言管理员或群主
   - 如果 `mute_user` 返回失败，只能如实说明失败原因，不能假装成功
+"""
+    if is_cross_user_direct_reply:
+        user_bound_tool_instruction = ""
+        cross_user_direct_instruction = """- 本轮是多用户逐条直接回复，不存在单一“当前用户”
+- 不要调用年度报告、画像更新、禁言自己这类绑定单个用户身份的工具
+- 需要发文本时，只调用一次 `reply_user`，每个目标一行，按提示编号顺序回复
 """
     system_prompt = f"""你是QQ群群友「{plugin_config.bot_name}」。
 你不是助手，不承认自己是AI。
@@ -1646,9 +1667,8 @@ async def create_chat_agent(
   - 如果 `add_message_emoji_like` 返回失败，不要假装成功；通常也不用专门解释
 - 外部知识、缩写、术语：优先 `search_web`
 - 群内上下文：`search_history_context`
-- 用户情绪或关系变化明显时，调用 `update_user_impression`
-- 若用户提到“年度报告 / 个人总结 / 成分分析”，直接调用 `generate_and_send_annual_report`；
-  工具完成后只回复“请查收~”，不要复述报告
+{user_bound_tool_instruction}
+{cross_user_direct_instruction}
 {voice_tool_instruction}
 {mute_tool_instruction}
 - 回复结束后调用 `finish`
@@ -1667,7 +1687,11 @@ async def create_chat_agent(
     search_meme_tool = create_search_meme_tool(session_id, request_id)
     send_meme_tool = create_send_meme_tool(session_id, request_id)
     relation_tool = create_relation_tool(session_id, request_id, user_id, user_name)
-    similar_meme_tool = create_similar_meme_tool(session_id, request_id, user_id)
+    similar_meme_tool = create_similar_meme_tool(
+        session_id,
+        request_id,
+        None if is_cross_user_direct_reply else user_id,
+    )
     emoji_like_tool = create_emoji_like_tool(
         session_id,
         request_id,
@@ -1679,16 +1703,38 @@ async def create_chat_agent(
         if voice_tool_available
         else None
     )
-    mute_tool = create_mute_tool(
-        session_id,
-        request_id,
-        interface,
-        bot_id,
-        user_id or None,
-        user_name,
-    )
+    mute_tool = None
+    if not is_cross_user_direct_reply:
+        mute_tool = create_mute_tool(
+            session_id,
+            request_id,
+            interface,
+            bot_id,
+            user_id or None,
+            user_name,
+        )
 
-    if not user_id or not user_name:
+    if is_cross_user_direct_reply:
+        tools = [
+            search_web,
+            search_history_context,
+            create_reply_tool(
+                session_id,
+                request_id,
+                interface,
+                allow_reply_duplicates=is_multi_direct_reply,
+                check_recent_duplicate=False,
+            ),
+            search_meme_tool,
+            similar_meme_tool,
+            send_meme_tool,
+            emoji_like_tool,
+            calculate_expression,
+            finish,
+        ]
+        if voice_tool is not None:
+            tools.insert(-1, voice_tool)
+    elif not user_id or not user_name:
         tools = [
             search_web,
             search_history_context,
@@ -1709,7 +1755,7 @@ async def create_chat_agent(
         ]
         if voice_tool is not None:
             tools.insert(-1, voice_tool)
-        if has_admin_permission:
+        if has_admin_permission and mute_tool is not None:
             tools.insert(-1, mute_tool)
     else:
         tools = [
@@ -1733,7 +1779,7 @@ async def create_chat_agent(
         ]
         if voice_tool is not None:
             tools.insert(-1, voice_tool)
-        if has_admin_permission:
+        if has_admin_permission and mute_tool is not None:
             tools.insert(-1, mute_tool)
 
     middleware = None
@@ -1966,6 +2012,7 @@ async def choice_response_strategy(
         direct_targets = direct_targets or []
         latest_user_msg = next((msg for msg in reversed(history) if msg.content_type != "bot"), None)
         focus_notice = ""
+        reply_scope_instruction = "如果需要回复，默认只回应当前触发消息的发送者；除非当前消息明确要求，否则不要替其他人答话。"
         emoji_like_candidates = _build_emoji_like_candidates(history)
         if direct_targets:
             focus_lines = ["【本轮需要逐条回复的消息】"]
@@ -1998,6 +2045,10 @@ async def choice_response_strategy(
             focus_lines.append("第1行只回复第1条消息，第2行只回复第2条消息，不要合并，不要漏回。")
             focus_lines.append("如果某条消息信息不足，也要单独用一句话说明。")
             focus_notice = "\n".join(focus_lines)
+            reply_scope_instruction = (
+                "本轮已经明确列出需要直接回复的消息；必须按编号逐条回复这些消息，"
+                "不要改成只回应最新一条。"
+            )
         elif latest_user_msg is not None:
             focus_id, focus_reply_id, focus_body = _parse_msg_meta(latest_user_msg.content)
             focus_body = focus_body or ("[图片]" if latest_user_msg.content_type == "image" else "")
@@ -2029,7 +2080,7 @@ async def choice_response_strategy(
 
 【任务】
 请根据上述对话历史，判断是否需要回复。如果需要，请调用相应工具。
-如果需要回复，默认只回应当前触发消息的发送者；除非当前消息明确要求，否则不要替其他人答话。
+{reply_scope_instruction}
 如果是针对图片的消息，请结合图片内容回答。
 如果上文包含“【本轮回复引用的消息】”，优先结合这些被回复的文本或图片消息回答。
 如果上文包含“【当前重点图片】”，优先围绕这些图片回答。

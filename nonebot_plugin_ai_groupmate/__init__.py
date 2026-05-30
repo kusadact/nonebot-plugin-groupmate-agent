@@ -47,6 +47,7 @@ from .utils import (
 from .config import Config
 from .memory import DB
 from .reply_guard import clear_request_sent, has_request_sent, set_latest_request_id
+from .agent.optional_tools import OptionalToolContext, list_optional_tool_statuses
 
 __plugin_meta__ = PluginMetadata(
     name="nonebot-plugin-ai-groupmate",
@@ -1328,8 +1329,38 @@ async def _try_auto_block_replied_meme(
 ai = on_command("ai", permission=SUPERUSER)
 
 
+async def _get_bot_admin_permission(interface: QryItrface | None, session_id: str, bot_id: str | None) -> bool:
+    if interface is None or not bot_id:
+        return False
+    try:
+        members = await interface.get_members(SceneType.GROUP, session_id)
+        for member in members:
+            if str(member.id) != str(bot_id):
+                continue
+            bot_role = getattr(getattr(member, "role", None), "name", None)
+            return bot_role in {"owner", "admin"}
+    except Exception as e:
+        logger.warning(f"检查 bot 管理权限失败: {e}")
+    return False
+
+
+def _format_tool_statuses(statuses) -> str:
+    enabled_lines = []
+    skipped_lines = []
+    for status in statuses:
+        tool_suffix = f" ({', '.join(status.tool_names)})" if status.tool_names else ""
+        if status.enabled:
+            enabled_lines.append(f"- {status.name}{tool_suffix}")
+        else:
+            skipped_lines.append(f"- {status.name}: {status.reason or 'not injected'}")
+
+    enabled_text = "\n".join(enabled_lines) if enabled_lines else "- 无"
+    skipped_text = "\n".join(skipped_lines) if skipped_lines else "- 无"
+    return f"ai tools\n\n已加载:\n{enabled_text}\n\n未加载:\n{skipped_text}"
+
+
 @ai.handle()
-async def _(arg: Message = CommandArg()):
+async def _(bot: Bot, session: Uninfo, interface: QryItrface, arg: Message = CommandArg()):
     sub = arg.extract_plain_text().strip().lower()
 
     if sub in {"on", "enable", "start", "1", "true", "开", "开启", "启用"}:
@@ -1347,8 +1378,33 @@ async def _(arg: Message = CommandArg()):
             qdrant_line = detail if ok else f"down ({detail})"
 
         await ai.finish(f"ai status: {status}\nqdrant: {qdrant_line}")
+    elif sub in {"tools", "tool", "工具"}:
+        user_name = session.user.name or session.user.nick or session.user.id
+        if session.member and session.member.nick:
+            user_name = session.member.nick
+        has_admin_permission = await _get_bot_admin_permission(interface, session.scene.id, bot.self_id)
+        optional_ctx = OptionalToolContext(
+            session_id=session.scene.id,
+            request_id=None,
+            user_id=session.user.id,
+            user_name=user_name,
+            interface=interface,
+            bot_id=bot.self_id,
+            history=[],
+            direct_targets=[],
+            emoji_like_candidate_ids=set(),
+            has_direct_targets=False,
+            is_multi_direct_reply=False,
+            is_cross_user_direct_reply=False,
+            has_admin_permission=has_admin_permission,
+            config=plugin_config,
+            model=None,
+            stop_words=stop_words,
+        )
+        statuses = await list_optional_tool_statuses(optional_ctx)
+        await ai.finish(_format_tool_statuses(statuses))
     else:
-        await ai.finish("Usage: /ai on|off|status")
+        await ai.finish("Usage: /ai on|off|status|tools")
 
 
 record = on_message(

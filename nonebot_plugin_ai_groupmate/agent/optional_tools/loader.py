@@ -2,6 +2,7 @@ import importlib.util
 import inspect
 import re
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -18,6 +19,15 @@ BUILTIN_TOOL_MODULES = [
     moderation,
     calculator,
 ]
+
+
+@dataclass
+class OptionalToolStatus:
+    name: str
+    source: str
+    enabled: bool
+    reason: str = ""
+    tool_names: list[str] = field(default_factory=list)
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -61,14 +71,14 @@ def _iter_user_tool_paths(tools_dir: Path) -> list[Path]:
     return tool_paths
 
 
-def _load_user_tool_module(path: Path) -> ModuleType | None:
+def _load_user_tool_module_result(path: Path) -> tuple[ModuleType | None, str]:
     tool_name = path.parent.name if path.name == "__init__.py" else path.stem
     module_name = f"_ai_groupmate_user_tool_{_safe_module_name(tool_name)}"
     search_locations = [str(path.parent)] if path.name == "__init__.py" else None
     spec = importlib.util.spec_from_file_location(module_name, path, submodule_search_locations=search_locations)
     if spec is None or spec.loader is None:
         logger.warning(f"跳过用户 Agent 工具 {path}: 无法创建模块 spec")
-        return None
+        return None, "invalid module spec"
 
     for loaded_name in list(sys.modules):
         if loaded_name == module_name or loaded_name.startswith(f"{module_name}."):
@@ -79,10 +89,15 @@ def _load_user_tool_module(path: Path) -> ModuleType | None:
     sys.modules[module_name] = module
     try:
         spec.loader.exec_module(module)
-    except Exception:
+    except Exception as e:
         sys.modules.pop(module_name, None)
         logger.exception(f"加载用户 Agent 工具失败: {path}")
-        return None
+        return None, f"{type(e).__name__}: {e}"
+    return module, ""
+
+
+def _load_user_tool_module(path: Path) -> ModuleType | None:
+    module, _ = _load_user_tool_module_result(path)
     return module
 
 
@@ -94,6 +109,14 @@ def _load_user_tool_modules() -> list[ModuleType]:
         if module is not None:
             modules.append(module)
     return modules
+
+
+def _tool_name(tool_item: Any) -> str:
+    return str(
+        getattr(tool_item, "name", None)
+        or getattr(tool_item, "__name__", None)
+        or type(tool_item).__name__
+    )
 
 
 async def _build_optional_tool_bundle(
@@ -129,6 +152,50 @@ async def _build_optional_tool_bundle(
     return bundle
 
 
+async def _inspect_optional_tool_module(
+    module: ModuleType,
+    ctx: OptionalToolContext,
+    *,
+    source: str,
+) -> tuple[OptionalToolStatus, OptionalToolBundle | None]:
+    name = _module_display_name(module)
+    try:
+        healthcheck = getattr(module, "healthcheck", None)
+        if healthcheck is not None:
+            ok, reason = await _maybe_await(healthcheck(ctx))
+            if not ok:
+                return OptionalToolStatus(name=name, source=source, enabled=False, reason=str(reason)), None
+
+        builder = getattr(module, "build", None)
+        if builder is None:
+            return OptionalToolStatus(name=name, source=source, enabled=False, reason="missing build()"), None
+
+        bundle = await _maybe_await(builder(ctx))
+    except Exception as e:
+        logger.exception(f"加载可选 Agent 工具失败: {source}")
+        return OptionalToolStatus(name=name, source=source, enabled=False, reason=f"{type(e).__name__}: {e}"), None
+
+    if not isinstance(bundle, OptionalToolBundle):
+        return OptionalToolStatus(
+            name=name,
+            source=source,
+            enabled=False,
+            reason="build() did not return OptionalToolBundle",
+        ), None
+    if not (bundle.tools or bundle.prompt or bundle.tool_limits):
+        return OptionalToolStatus(name=bundle.name or name, source=source, enabled=False, reason="empty bundle"), None
+
+    return (
+        OptionalToolStatus(
+            name=bundle.name or name,
+            source=source,
+            enabled=True,
+            tool_names=[_tool_name(tool_item) for tool_item in bundle.tools],
+        ),
+        bundle,
+    )
+
+
 async def load_optional_tool_bundles(ctx: OptionalToolContext) -> list[OptionalToolBundle]:
     bundles: list[OptionalToolBundle] = []
 
@@ -147,3 +214,33 @@ async def load_optional_tool_bundles(ctx: OptionalToolContext) -> list[OptionalT
             bundles.append(bundle)
 
     return bundles
+
+
+async def list_optional_tool_statuses(ctx: OptionalToolContext) -> list[OptionalToolStatus]:
+    statuses: list[OptionalToolStatus] = []
+
+    for module in BUILTIN_TOOL_MODULES:
+        status, _ = await _inspect_optional_tool_module(module, ctx, source="builtin")
+        statuses.append(status)
+
+    for path in _iter_user_tool_paths(get_user_tools_dir()):
+        module, error = _load_user_tool_module_result(path)
+        if module is None:
+            tool_name = path.parent.name if path.name == "__init__.py" else path.stem
+            statuses.append(
+                OptionalToolStatus(
+                    name=tool_name,
+                    source=str(path),
+                    enabled=False,
+                    reason=error or "import failed",
+                )
+            )
+            continue
+        status, _ = await _inspect_optional_tool_module(
+            module,
+            ctx,
+            source=getattr(module, "__file__", module.__name__),
+        )
+        statuses.append(status)
+
+    return statuses

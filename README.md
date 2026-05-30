@@ -184,6 +184,7 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
 | `/ai on` | 打开插件，仅 superuser 可用 |
 | `/ai off` | 关闭插件，仅 superuser 可用 |
 | `/ai status` | 查看插件状态与 Qdrant 连通性 |
+| `/ai tools` | 查看当前会注入 Agent 的可选工具，以及被跳过的工具原因 |
 | `/词频 <统计天数>` | 生成个人词频词云 |
 | `/群词频 <统计天数>` | 生成群词频词云 |
 

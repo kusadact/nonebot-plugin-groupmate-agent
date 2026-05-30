@@ -67,7 +67,6 @@ with open(Path(__file__).parent / "stop_words.txt", encoding="utf-8") as f:
     stop_words = f.read().splitlines() + ["id", "回复"]
 
 _MAX_DIRECT_REPLY_TARGETS = 3
-_INAPPROPRIATE_IMAGE_REFUSAL_TEXT = "图片内容可能不恰当，拒绝回复。"
 
 
 class PermanentMultimodalError(Exception):
@@ -967,13 +966,13 @@ async def _build_reply_binding(
     reply_to_message_id: str | None,
     event: Event,
     bot: Bot,
-) -> tuple[list[dict[str, str]], list[dict[str, str]], bool, str | None, bool]:
+) -> tuple[list[dict[str, str]], list[dict[str, str]], bool, str | None]:
     if not reply_to_message_id:
-        return [], [], False, None, False
+        return [], [], False, None
 
     normalized_reply_id = str(reply_to_message_id).strip()
     if not normalized_reply_id:
-        return [], [], False, None, False
+        return [], [], False, None
 
     base_stmt = (
         Select(ChatHistory)
@@ -1053,7 +1052,7 @@ async def _build_reply_binding(
         if image_rows > 0 and not bound_images:
             logger.warning(f"被回复消息含图片但本地图片无法加载 msg_id={normalized_reply_id}，尝试 API 解析")
         else:
-            return bound_messages, bound_images, False, None, image_rows > 0 or bool(bound_images)
+            return bound_messages, bound_images, False, None
 
     logger.info(f"本地未完整命中被回复消息，尝试 API 解析 msg_id={normalized_reply_id}")
     api_bound_messages, api_bound_images, api_saw_image = await _build_reply_binding_from_api(
@@ -1068,8 +1067,8 @@ async def _build_reply_binding(
                 "已解析到被回复消息文字，但其中图片没有加载成功。不要把最近历史图片当成这次回复指向的图片；"
                 "如果需要图片内容，请直接说明图片未加载。"
             )
-            return api_bound_messages, api_bound_images, True, notice, True
-        return api_bound_messages, api_bound_images, False, None, api_saw_image or bool(api_bound_images)
+            return api_bound_messages, api_bound_images, True, notice
+        return api_bound_messages, api_bound_images, False, None
 
     if bound_messages and image_rows > 0 and not bound_images:
         notice = (
@@ -1077,7 +1076,7 @@ async def _build_reply_binding(
             "已命中被回复消息记录，但其中图片没有加载成功。不要把最近历史图片当成这次回复指向的图片；"
             "如果需要图片内容，请直接说明图片未加载。"
         )
-        return bound_messages, bound_images, True, notice, True
+        return bound_messages, bound_images, True, notice
 
     notice = (
         f"【回复绑定提示】本轮消息显式回复了 id={normalized_reply_id} 的旧消息，"
@@ -1089,7 +1088,7 @@ async def _build_reply_binding(
         f"被回复消息仍未解析成功 msg_id={normalized_reply_id} "
         f"disable_inline_images={should_disable_inline_images}"
     )
-    return bound_messages, bound_images, should_disable_inline_images, notice, image_rows > 0 or api_saw_image
+    return bound_messages, bound_images, should_disable_inline_images, notice
 
 
 async def _build_bound_context(
@@ -1100,12 +1099,11 @@ async def _build_bound_context(
     state: T_State,
     session_id: str,
     reply_to_message_id: str | None,
-) -> tuple[list[dict[str, str]], list[dict[str, str]], bool, str | None, bool]:
+) -> tuple[list[dict[str, str]], list[dict[str, str]], bool, str | None]:
     bound_messages: list[dict[str, str]] = []
     bound_images: list[dict[str, str]] = []
     disable_inline_history_images = False
     binding_notice: str | None = None
-    reply_contains_image = False
     if imgs:
         bound_images.extend(await _build_current_event_bound_images(imgs, event, bot, state))
     if reply_to_message_id:
@@ -1114,7 +1112,6 @@ async def _build_bound_context(
             reply_bound_images,
             disable_inline_history_images,
             binding_notice,
-            reply_contains_image,
         ) = await _build_reply_binding(
             db_session,
             session_id,
@@ -1124,7 +1121,7 @@ async def _build_bound_context(
         )
         bound_messages.extend(reply_bound_messages)
         bound_images.extend(reply_bound_images)
-    return bound_messages, bound_images, disable_inline_history_images, binding_notice, reply_contains_image
+    return bound_messages, bound_images, disable_inline_history_images, binding_notice
 
 
 async def _plain_text_mentions_bot(plain_text: str, bot: Bot, session: Uninfo, interface: QryItrface) -> bool:
@@ -1577,22 +1574,11 @@ async def handle_message(
 
     if should_reply:
         group_id = session.scene.id
-        direct_targets: list[dict[str, Any]] = []
-        raw_direct_targets: list[DirectReplyTarget] = []
-        is_direct = bool(to_me)
-        if is_direct and imgs:
-            logger.info(
-                f"直接触发消息含当前图片，拒绝提交 Agent group={group_id} "
-                f"user={session.user.id} current_images={len(imgs)}"
-            )
-            await UniMessage.text(_INAPPROPRIATE_IMAGE_REFUSAL_TEXT).send(reply_to=True)
-            return
         (
             bound_messages,
             bound_images,
             disable_inline_history_images,
             binding_notice,
-            reply_contains_image,
         ) = await _build_bound_context(
             db_session,
             imgs,
@@ -1602,13 +1588,9 @@ async def handle_message(
             group_id,
             reply_to_message_id,
         )
-        if is_direct and reply_contains_image:
-            logger.info(
-                f"直接触发消息回复目标含图片，拒绝提交 Agent group={group_id} "
-                f"user={session.user.id} reply_to={reply_to_message_id}"
-            )
-            await UniMessage.text(_INAPPROPRIATE_IMAGE_REFUSAL_TEXT).send(reply_to=True)
-            return
+        direct_targets: list[dict[str, Any]] = []
+        raw_direct_targets: list[DirectReplyTarget] = []
+        is_direct = bool(to_me)
         if is_direct:
             current_target = DirectReplyTarget(
                 message_id=current_message_id,

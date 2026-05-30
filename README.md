@@ -39,29 +39,19 @@ plugins = ["nonebot_plugin_ai_groupmate"]
 | `ai_groupmate__bot_name` | `bot` | bot 名称 |
 | `ai_groupmate__reply_probability` | `0.01` | 群内主动发言概率 |
 | `ai_groupmate__personality_setting` | 空 | 自定义人设补充 |
-| `ai_groupmate__tavily_api_key` | 空 | Tavily 搜索 API Key |
-| `ai_groupmate__qwen_token` | 空 | DashScope 通用 API Key，`summary` / `multimodal` 可回退使用 |
-| `ai_groupmate__summary_base_url` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | 总结模型 base URL |
-| `ai_groupmate__summary_model` | `qwen-flash` | 群体认知档案总结模型 |
-| `ai_groupmate__summary_api_key` | 空 | 总结模型 API Key |
-| `ai_groupmate__openai_base_url` | 空 | 主对话模型 base URL |
-| `ai_groupmate__openai_model` | 空 | 主对话模型名，需支持 Tool Calling |
-| `ai_groupmate__openai_token` | 空 | 主对话模型 API Key |
-| `ai_groupmate__multimodal_base_url` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | 多模态模型 base URL |
-| `ai_groupmate__multimodal_model` | `qwen-vl-max` | 图片理解模型 |
-| `ai_groupmate__multimodal_api_key` | 空 | 多模态模型 API Key |
+| `ai_groupmate__provider` | `dashscope` | 默认供应商；`dashscope` 时自动补齐通义千问默认模型和地址 |
+| `ai_groupmate__api_key` | 空 | 默认 API Key；`dashscope` 时可作为主对话、总结、多模态和图片 embedding 的通用 Key |
+| `ai_groupmate__base_url` | 空 | 主对话模型 base URL；不填时随 provider 默认 |
+| `ai_groupmate__model` | `qwen3.5-plus` | 主对话模型名，需支持 Tool Calling |
 | `ai_groupmate__remote_embedding_base_url` | 空 | 文本 embedding 地址 |
 | `ai_groupmate__remote_embedding_model` | 空 | 文本 embedding 模型名 |
 | `ai_groupmate__remote_embedding_api_key` | 空 | 文本 embedding API Key |
-| `ai_groupmate__remote_media_embedding_provider` | `aliyun_dashscope` | 图片 embedding 提供方：`openai` / `aliyun_dashscope` |
-| `ai_groupmate__remote_media_embedding_base_url` | 空 | 图片 embedding 地址 |
-| `ai_groupmate__remote_media_embedding_model` | 空 | 图片 embedding 模型名 |
-| `ai_groupmate__remote_media_embedding_api_key` | 空 | 图片 embedding API Key |
 | `ai_groupmate__remote_rerank_base_url` | 空 | 文本 rerank 地址 |
 | `ai_groupmate__remote_rerank_model` | 空 | 文本 rerank 模型名 |
 | `ai_groupmate__remote_rerank_api_key` | 空 | 文本 rerank API Key |
 | `ai_groupmate__qdrant_uri` | 空 | Qdrant 地址；不填则禁用 RAG / 表情包向量功能 |
 | `ai_groupmate__qdrant_api_key` | 空 | Qdrant API Key |
+| `ai_groupmate__tavily_api_key` | 空 | Tavily 搜索 API Key |
 | `ai_groupmate__voice_enabled` | `false` | 是否启用语音工具 |
 | `ai_groupmate__voice_base_url` | 空 | GPT-SoVITS 服务地址 |
 
@@ -73,6 +63,20 @@ plugins = ["nonebot_plugin_ai_groupmate"]
 | `ai_groupmate__chat_vector_dim` | `1024` | 聊天文本向量维度 |
 | `ai_groupmate__media_vector_dim` | `2560` | 图片向量维度 |
 | `ai_groupmate__remote_embedding_dimensions` | `1024` | 文本 embedding 维度 |
+| `ai_groupmate__qwen_token` | 空 | 兼容旧配置；DashScope API Key |
+| `ai_groupmate__openai_base_url` | 空 | 兼容旧配置；主对话模型 base URL，显式配置后覆盖 provider 默认值 |
+| `ai_groupmate__openai_model` | 空 | 兼容旧配置；主对话模型名，显式配置后覆盖 provider 默认值 |
+| `ai_groupmate__openai_token` | 空 | 兼容旧配置；主对话模型 API Key，显式配置后覆盖 `api_key` |
+| `ai_groupmate__summary_base_url` | 空 | 总结模型 base URL，显式配置后覆盖 provider 默认值 |
+| `ai_groupmate__summary_model` | 空 | 群体认知档案总结模型，显式配置后覆盖 provider 默认值 |
+| `ai_groupmate__summary_api_key` | 空 | 总结模型 API Key，显式配置后覆盖 `api_key` |
+| `ai_groupmate__multimodal_base_url` | 空 | 多模态模型 base URL，显式配置后覆盖 provider 默认值 |
+| `ai_groupmate__multimodal_model` | 空 | 图片理解模型，显式配置后覆盖 provider 默认值 |
+| `ai_groupmate__multimodal_api_key` | 空 | 多模态模型 API Key，显式配置后覆盖 `api_key` |
+| `ai_groupmate__remote_media_embedding_provider` | 空 | 图片 embedding 提供方：`openai` / `aliyun_dashscope`；不填时随 provider 默认 |
+| `ai_groupmate__remote_media_embedding_base_url` | 空 | 图片 embedding 地址，显式配置后覆盖 provider 默认值 |
+| `ai_groupmate__remote_media_embedding_model` | 空 | 图片 embedding 模型名，显式配置后覆盖 provider 默认值 |
+| `ai_groupmate__remote_media_embedding_api_key` | 空 | 图片 embedding API Key，显式配置后覆盖 `api_key` |
 | `ai_groupmate__remote_media_embedding_dimensions` | `2560` | 图片 embedding 维度 |
 | `ai_groupmate__media_search_recall_limit` | `6` | 表情包检索召回候选数 |
 | `ai_groupmate__media_search_return_limit` | `5` | 表情包检索最终返回数 |

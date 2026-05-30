@@ -1,7 +1,28 @@
 from pydantic import BaseModel, Field
 
+DASHSCOPE_COMPATIBLE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+DASHSCOPE_MEDIA_EMBEDDING_BASE_URL = (
+    "https://dashscope.aliyuncs.com/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding"
+)
+DASHSCOPE_CHAT_MODEL = "qwen3.5-plus"
+DASHSCOPE_SUMMARY_MODEL = "qwen-flash"
+DASHSCOPE_MULTIMODAL_MODEL = "qwen-vl-max"
+DASHSCOPE_MEDIA_EMBEDDING_PROVIDER = "aliyun_dashscope"
+DASHSCOPE_MEDIA_EMBEDDING_MODEL = "qwen3-vl-embedding"
+
+
+def _first_non_empty(*values: str) -> str:
+    for value in values:
+        if value and value.strip():
+            return value.strip()
+    return ""
+
 
 class ScopedConfig(BaseModel):
+    provider: str = "dashscope"
+    api_key: str = ""
+    base_url: str = ""
+    model: str = ""
     bot_name: str = "bot"
     reply_probability: float = 0.01
     personality_setting: str = ""
@@ -22,7 +43,7 @@ class ScopedConfig(BaseModel):
     remote_rerank_api_key: str = ""
     remote_rerank_model: str = ""
     # 媒体 embedding 分路（OpenAI 风格 embeddings 接口）
-    remote_media_embedding_provider: str = "aliyun_dashscope"  # 可选: "openai", "aliyun_dashscope"
+    remote_media_embedding_provider: str = ""  # 可选: "openai", "aliyun_dashscope"
     remote_media_embedding_base_url: str = ""
     remote_media_embedding_api_key: str = ""
     remote_media_embedding_model: str = ""
@@ -34,11 +55,11 @@ class ScopedConfig(BaseModel):
     remote_media_rerank_model: str = ""
     tavily_api_key: str = ""
     qwen_token: str = ""
-    summary_model: str = "qwen-flash"
-    summary_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    summary_model: str = ""
+    summary_base_url: str = ""
     summary_api_key: str = ""
-    multimodal_model: str = "qwen-vl-max"
-    multimodal_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    multimodal_model: str = ""
+    multimodal_base_url: str = ""
     multimodal_api_key: str = ""
     openai_base_url: str = ""
     openai_model: str = ""
@@ -50,6 +71,101 @@ class ScopedConfig(BaseModel):
     voice_top_k: int = 15
     voice_top_p: float = 1.0
     voice_temperature: float = 1.0
+
+    @property
+    def provider_normalized(self) -> str:
+        return (self.provider or "dashscope").strip().lower().replace("-", "_")
+
+    @property
+    def is_dashscope_provider(self) -> bool:
+        return self.provider_normalized in {"dashscope", "aliyun", "aliyun_dashscope", "qwen", "qianwen"}
+
+    @property
+    def chat_base_url(self) -> str:
+        return _first_non_empty(
+            self.openai_base_url,
+            self.base_url,
+            DASHSCOPE_COMPATIBLE_BASE_URL if self.is_dashscope_provider else "",
+        )
+
+    @property
+    def chat_model(self) -> str:
+        return _first_non_empty(
+            self.openai_model,
+            self.model,
+            DASHSCOPE_CHAT_MODEL if self.is_dashscope_provider else "",
+        )
+
+    @property
+    def chat_api_key(self) -> str:
+        return _first_non_empty(self.openai_token, self.qwen_token, self.api_key)
+
+    @property
+    def summary_base_url_resolved(self) -> str:
+        return _first_non_empty(
+            self.summary_base_url,
+            DASHSCOPE_COMPATIBLE_BASE_URL if self.is_dashscope_provider else "",
+        )
+
+    @property
+    def summary_model_resolved(self) -> str:
+        return _first_non_empty(
+            self.summary_model,
+            DASHSCOPE_SUMMARY_MODEL if self.is_dashscope_provider else "",
+        )
+
+    @property
+    def summary_api_key_resolved(self) -> str:
+        return _first_non_empty(self.summary_api_key, self.qwen_token, self.api_key, self.openai_token)
+
+    @property
+    def multimodal_base_url_resolved(self) -> str:
+        return _first_non_empty(
+            self.multimodal_base_url,
+            DASHSCOPE_COMPATIBLE_BASE_URL if self.is_dashscope_provider else "",
+        )
+
+    @property
+    def multimodal_model_resolved(self) -> str:
+        return _first_non_empty(
+            self.multimodal_model,
+            DASHSCOPE_MULTIMODAL_MODEL if self.is_dashscope_provider else "",
+        )
+
+    @property
+    def multimodal_api_key_resolved(self) -> str:
+        return _first_non_empty(self.multimodal_api_key, self.qwen_token, self.api_key)
+
+    @property
+    def remote_media_embedding_provider_resolved(self) -> str:
+        return _first_non_empty(
+            self.remote_media_embedding_provider,
+            DASHSCOPE_MEDIA_EMBEDDING_PROVIDER if self.is_dashscope_provider else "openai",
+        )
+
+    @property
+    def remote_media_embedding_base_url_resolved(self) -> str:
+        return _first_non_empty(
+            self.remote_media_embedding_base_url,
+            DASHSCOPE_MEDIA_EMBEDDING_BASE_URL
+            if self.remote_media_embedding_provider_resolved == DASHSCOPE_MEDIA_EMBEDDING_PROVIDER
+            else "",
+        )
+
+    @property
+    def remote_media_embedding_model_resolved(self) -> str:
+        return _first_non_empty(
+            self.remote_media_embedding_model,
+            DASHSCOPE_MEDIA_EMBEDDING_MODEL
+            if self.remote_media_embedding_provider_resolved == DASHSCOPE_MEDIA_EMBEDDING_PROVIDER
+            else "",
+        )
+
+    @property
+    def remote_media_embedding_api_key_resolved(self) -> str:
+        if self.remote_media_embedding_provider_resolved == DASHSCOPE_MEDIA_EMBEDDING_PROVIDER:
+            return _first_non_empty(self.remote_media_embedding_api_key, self.qwen_token, self.api_key)
+        return _first_non_empty(self.remote_media_embedding_api_key, self.api_key)
 
 
 class Config(BaseModel):

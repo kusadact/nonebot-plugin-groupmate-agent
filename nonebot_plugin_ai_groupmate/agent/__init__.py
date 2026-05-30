@@ -87,9 +87,9 @@ class ResponseMessage(BaseModel):
 
 
 reply_gate_model = ChatOpenAI(
-    model=plugin_config.openai_model,
-    api_key=SecretStr(plugin_config.openai_token),
-    base_url=plugin_config.openai_base_url,
+    model=plugin_config.chat_model,
+    api_key=SecretStr(plugin_config.chat_api_key),
+    base_url=plugin_config.chat_base_url,
     temperature=0,
 )
 
@@ -1266,9 +1266,9 @@ def create_relation_tool(
 
 tools = [search_web, search_history_context, calculate_expression]
 model = ChatOpenAI(
-    model=plugin_config.openai_model,
-    api_key=SecretStr(plugin_config.openai_token),
-    base_url=plugin_config.openai_base_url,
+    model=plugin_config.chat_model,
+    api_key=SecretStr(plugin_config.chat_api_key),
+    base_url=plugin_config.chat_base_url,
     temperature=1,
 )
 
@@ -2103,9 +2103,9 @@ async def choice_response_strategy(
 
 if __name__ == "__main__":
     model = ChatOpenAI(
-        model=plugin_config.openai_model,
-        api_key=SecretStr(plugin_config.openai_token),
-        base_url=plugin_config.openai_base_url,
+        model=plugin_config.chat_model,
+        api_key=SecretStr(plugin_config.chat_api_key),
+        base_url=plugin_config.chat_base_url,
         temperature=0.7,
     )
     agent = create_agent(model, tools=tools, response_format=ToolStrategy(ResponseMessage))

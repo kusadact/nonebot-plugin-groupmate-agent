@@ -65,7 +65,6 @@ plugin_config = get_plugin_config(Config).ai_groupmate
 with open(Path(__file__).parent / "stop_words.txt", encoding="utf-8") as f:
     stop_words = f.read().splitlines() + ["id", "回复"]
 
-_DEFAULT_DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 _MAX_DIRECT_REPLY_TARGETS = 3
 
 
@@ -73,35 +72,26 @@ class PermanentMultimodalError(Exception):
     """Provider rejected the media request and retrying will not help."""
 
 
-def _pick_api_key(*values: str) -> str:
-    for value in values:
-        if value and value.strip():
-            return value.strip()
-    return ""
-
-
-_summary_api_key = _pick_api_key(plugin_config.summary_api_key, plugin_config.qwen_token, plugin_config.openai_token)
 summary_model = (
     ChatOpenAI(
-        model=plugin_config.summary_model,
-        api_key=SecretStr(_summary_api_key),
-        base_url=plugin_config.summary_base_url or _DEFAULT_DASHSCOPE_BASE_URL,
+        model=plugin_config.summary_model_resolved,
+        api_key=SecretStr(plugin_config.summary_api_key_resolved),
+        base_url=plugin_config.summary_base_url_resolved,
         temperature=0.3,
         max_completion_tokens=800,
     )
-    if plugin_config.summary_model and _summary_api_key
+    if plugin_config.summary_model_resolved and plugin_config.summary_api_key_resolved
     else None
 )
 
-_multimodal_api_key = _pick_api_key(plugin_config.multimodal_api_key, plugin_config.qwen_token)
 multimodal_model = (
     ChatOpenAI(
-        model=plugin_config.multimodal_model,
-        api_key=SecretStr(_multimodal_api_key),
-        base_url=plugin_config.multimodal_base_url or _DEFAULT_DASHSCOPE_BASE_URL,
+        model=plugin_config.multimodal_model_resolved,
+        api_key=SecretStr(plugin_config.multimodal_api_key_resolved),
+        base_url=plugin_config.multimodal_base_url_resolved,
         temperature=0.01,
     )
-    if plugin_config.multimodal_model and _multimodal_api_key
+    if plugin_config.multimodal_model_resolved and plugin_config.multimodal_api_key_resolved
     else None
 )
 

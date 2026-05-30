@@ -1,11 +1,9 @@
 import asyncio
 import base64
-import collections
 import datetime
 import difflib
 import json
 import mimetypes
-import random
 import re
 import traceback
 from dataclasses import dataclass
@@ -14,20 +12,16 @@ from typing import Any, cast
 
 import jieba
 from langchain.agents import create_agent
-from langchain.agents.structured_output import ToolStrategy
 from langchain.tools import ToolRuntime, tool
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
-from langchain_tavily import TavilySearch
-from nonebot import get_bot, get_plugin_config, require
+from nonebot import get_plugin_config, require
 from nonebot.log import logger
 from nonebot_plugin_alconna import UniMessage
 from nonebot_plugin_orm import get_session
 from nonebot_plugin_uninfo import QryItrface, SceneType
 from pydantic import BaseModel, Field, SecretStr, field_validator
-from simpleeval import simple_eval
-from sqlalchemy import Select, desc, extract, func
+from sqlalchemy import Select, desc
 from sqlalchemy.orm.session import Session
 
 try:
@@ -40,8 +34,9 @@ from ..favorability import apply_favorability_change_detailed
 from ..memory import DB
 from ..model import ChatHistory, ChatHistorySchema, GroupMemory, MediaStorage, UserRelation
 from ..reply_guard import is_request_active, mark_request_sent
-from .emoji_like import EMOJI_LIKE_CATEGORY_PROMPT, create_emoji_like_tool, extract_emoji_like_message_id_text
-from .voice_tool import create_voice_tool, get_voice_supported_text_langs, is_voice_service_healthy
+from .emoji_like import extract_emoji_like_message_id_text
+from .optional_tools import OptionalToolContext, load_optional_tool_bundles
+from .optional_tools.moderation import PERMISSION_STATUS
 
 require("nonebot_plugin_localstore")
 
@@ -53,12 +48,6 @@ plugin_path = Path(__file__).parent
 plugin_config = get_plugin_config(Config).ai_groupmate
 with open(Path(__file__).parent.parent / "stop_words.txt", encoding="utf-8") as f:
     stop_words = f.read().splitlines() + ["id", "回复"]
-
-if plugin_config.tavily_api_key:
-    tavily_search = TavilySearch(max_results=3, tavily_api_key=plugin_config.tavily_api_key)
-else:
-    tavily_search = None
-
 
 @dataclass
 class Context:
@@ -139,24 +128,6 @@ async def check_if_should_reply(
         return False
 
 
-# 如果想封装成自定义的 @tool，可以这样写:
-@tool("search_web")
-async def search_web(query: str, runtime: ToolRuntime[Context]) -> str:
-    """
-    用于搜索最新的实时信息。当你需要最新的事实信息、天气或新闻时使用。
-    输入：需要搜索的内容。
-    """
-    if runtime.context.request_id is not None and not await is_request_active(
-        runtime.context.session_id, runtime.context.request_id
-    ):
-        return "请求已过期，已取消搜索。"
-    if not tavily_search:
-        logger.error("没有配置 tavily_api_key, 无法进行搜索")
-        return "没有配置 tavily_api_key, 无法进行搜索"
-    results = await tavily_search.ainvoke(query)
-    return results
-
-
 @tool("search_history_context")
 async def search_history_context(query: str, runtime: ToolRuntime[Context]) -> str:
     """
@@ -182,242 +153,6 @@ async def search_history_context(query: str, runtime: ToolRuntime[Context]) -> s
     except Exception as e:
         logger.error(f"历史搜索失败: {e}")
         return "未找到相关历史记录"
-
-
-def create_report_tool(
-    session_id: str,
-    request_id: str | None,
-    user_id: str,
-    user_name: str | None,
-    llm_client: ChatOpenAI,
-):
-    """
-    创建年度报告工具（限制在当前群聊 session_id 范围内）
-    """
-
-    @tool("generate_and_send_annual_report")
-    async def generate_and_send_annual_report() -> str:
-        """
-        生成并发送当前群聊的年度报告。
-        包含：个人在本群的统计、性格分析、全群排行榜以及Bot的好感度回顾。
-        """
-        if request_id is not None and not await is_request_active(session_id, request_id):
-            return "请求已过期，已取消发送。"
-
-        try:
-            logger.info(f"开始生成用户 {user_name} 在群 {session_id} 的年度报告...")
-            now = datetime.datetime.now()
-            current_year = now.year
-            async with get_session() as db_session:
-                stmt = Select(ChatHistory).where(
-                    ChatHistory.user_id == user_id,
-                    ChatHistory.session_id == session_id,  # <--- 关键修改：限制群聊范围
-                    extract("year", ChatHistory.created_at) == current_year,
-                )
-                all_msgs = (await db_session.execute(stmt)).scalars().all()
-
-                if not all_msgs:
-                    await UniMessage.text("你今年在这个群好像没怎么说话，生成不了报告哦...").send()
-                    if request_id is not None:
-                        mark_request_sent(session_id, request_id)
-                    return "用户本群无数据。"
-
-                # 统计与采样
-                text_msgs = [m.content for m in all_msgs if m.content_type == "text" and m.content]
-                total_count = len(all_msgs)
-
-                # 采样 30 条让 LLM 分析 (只分析在这个群说的话)
-                samples = random.sample(text_msgs, min(len(text_msgs), 30)) if text_msgs else []
-                longest_msg = max(text_msgs, key=len) if text_msgs else "无"
-                if len(longest_msg) > 60:
-                    longest_msg = longest_msg[:60] + "..."
-
-                # 活跃时间
-                active_hour_desc = "潜水员"
-                if all_msgs:
-                    hours = [m.created_at.hour for m in all_msgs]
-                    top_hour = collections.Counter(hours).most_common(1)[0][0]
-                    active_hour_desc = f"{top_hour}点"
-
-                async def get_rank_str(content_type=None, hour_limit=None):
-                    stmt = Select(ChatHistory.user_id, func.count(ChatHistory.msg_id).label("c")).where(
-                        extract("year", ChatHistory.created_at) == current_year,
-                        ChatHistory.session_id == session_id,
-                    )
-
-                    if content_type:
-                        stmt = stmt.where(ChatHistory.content_type == content_type)
-                    if hour_limit:
-                        stmt = stmt.where(extract("hour", ChatHistory.created_at) < hour_limit)
-
-                    stmt = stmt.group_by(ChatHistory.user_id).order_by(desc("c")).limit(3)
-                    rows = (await db_session.execute(stmt)).all()
-
-                    if not rows:
-                        return "虚位以待"
-
-                    rank_items = []
-                    for uid, count in rows:
-                        name_stmt = (
-                            Select(ChatHistory.user_name)
-                            .where(ChatHistory.user_id == uid)
-                            .order_by(desc(ChatHistory.created_at))
-                            .limit(1)
-                        )
-
-                        latest_name = (await db_session.execute(name_stmt)).scalar()
-                        display_name = latest_name if latest_name else f"用户{uid}"
-                        rank_items.append(f"{display_name}({count})")
-                    return ", ".join(rank_items)
-
-                rank_talk = await get_rank_str()
-                rank_img = await get_rank_str(content_type="image")
-                rank_night = await get_rank_str(hour_limit=5)
-
-                stmt_text = (
-                    Select(ChatHistory.content)
-                    .where(
-                        ChatHistory.session_id == session_id,
-                        extract("year", ChatHistory.created_at) == current_year,
-                        ChatHistory.user_id == user_id,
-                        ChatHistory.content_type == "text",
-                    )
-                    .order_by(desc(ChatHistory.created_at))
-                    .limit(2000)
-                )
-
-                rows = (await db_session.execute(stmt_text)).all()
-                sample_text = "\n".join([r[0] for r in rows if r[0]])
-
-                clean_text = re.sub(r"[^\u4e00-\u9fa5]", "", sample_text)
-                words = jieba.lcut(clean_text)
-                filtered = [w for w in words if len(w) > 1 and w not in stop_words]
-                hot_words_str = "、".join([x[0] for x in collections.Counter(filtered).most_common(8)])
-
-                relation_stmt = Select(UserRelation).where(UserRelation.user_id == user_id)
-                relation = (await db_session.execute(relation_stmt)).scalar_one_or_none()
-
-                favorability = 0
-                favorability_raw = 0
-                relation_state = "normal"
-                relation_state_desc = "陌生/普通"
-                impression_tags = []
-                if relation:
-                    favorability = relation.favorability
-                    favorability_raw = relation.favorability_raw
-                    relation_state = relation.state or "normal"
-                    relation_state_desc = relation.get_status_desc()
-                    impression_tags = relation.tags if relation.tags else []
-
-                relation_desc = (
-                    f"关系状态: {relation_state} ({relation_state_desc}), "
-                    f"分值(映射分/原始分): {favorability}/{favorability_raw}, "
-                    f"印象标签: {', '.join(impression_tags)}"
-                )
-
-
-            # 构造一个专门写报告的 Prompt
-            # 这个 Prompt 不需要关心我是谁，只需要关心怎么把数据变成文本
-            report_prompt = ChatPromptTemplate.from_messages(
-                [
-                    (
-                        "system",
-                        """你是一个专业的年度报告撰写助手。
-你的任务是阅读用户的聊天统计数据和发言样本，分析其性格，然后生成一份格式整洁、风格幽默的年度报告。
-
-【语气控制指南 (非常重要)】
-根据用户的“关系状态”调整你的语气：
-- 状态为 happy / affectionate / enamored / love：语气更亲密、偏宠溺，可以适当煽情。
-- 状态为 upset / distressed / broken：语气可傲娇、嫌弃、带吐槽，但不要失控辱骂。
-- 状态为 normal：语气正常、友善、带一点调侃。
-关系状态是主依据；分值只作参考。其中“映射分”用于展示，“原始分”才是核心变化依据。
-
-【排版要求】
-1. **绝对禁止使用 Markdown**（不要用 #, **, ##, - 等符号列表）。
-2. 使用 Emoji 和 纯文本分隔符（如 ━━━━━━━━）来排版。
-3. 语气要像老朋友一样，可以根据数据进行调侃或夸奖。
-
-【必须包含的板块】
-1. 📊 标题行 ({year}年度报告 | 用户名)
-2. 📈 基础数据 (发言数、活跃时间、最长发言摘要)
-3. 💌 我们的羁绊 (根据关系状态与标签，写一段话回顾你们的关系。正向关系可煽情，负向关系可吐槽。)
-4. 🔥 年度热词 (列出数据中提供的热词)
-5. 🏆 群内风云榜 (必须包含以下三个榜单)
-   - 🗣️ 龙王榜 (发言最多)
-   - 🎭 斗图榜 (发图最多)
-   - 🦉 修仙榜 (熬夜最多)
-6. 🧠 成分分析 (这是**重点**：请阅读提供的 `samples` 聊天记录，分析这个人的说话风格、性格、是不是复读机、是不是爱发疯。写一段100字左右的犀利点评)
-7. 💡 {bot_name}寄语 (一句简短的祝福)
-""",
-                    ),
-                    (
-                        "user",
-                        """
-【用户数据】
-用户名: {user_name}
-年份: {year}
-累计发言: {count}
-活跃时间: {active_hour}
-最长发言片段: {longest_msg}
-年度热词: {hot_words}
-
-【{bot_name}与用户的关系】
-{relation_desc}
-
-【全群排行参考】
-龙王榜: {rank_talk}
-斗图榜: {rank_img}
-熬夜榜: {rank_night}
-
-【用户发言样本 (用于性格分析)】
-{samples}
-
-请生成报告：""",
-                    ),
-                ]
-            )
-
-            # 组装数据
-            prompt_input = {
-                "user_name": user_name,
-                "bot_name": plugin_config.bot_name,
-                "year": current_year,
-                "count": total_count,
-                "active_hour": active_hour_desc,
-                "longest_msg": longest_msg,
-                "hot_words": hot_words_str,
-                "relation_desc": relation_desc,
-                "rank_talk": rank_talk,
-                "rank_img": rank_img,
-                "rank_night": rank_night,
-                "samples": "\n".join(samples),  # 把样本拼接成字符串喂给 LLM
-            }
-
-            logger.info(f"内部 LLM 生成报告中，状态: {relation_state}, 分值(映射/原始): {favorability}/{favorability_raw}")
-            chain = report_prompt | llm_client
-            response_msg = await chain.ainvoke(prompt_input)
-            final_report_text = response_msg.content
-            if not isinstance(final_report_text, str):
-                return "输出结果失败"
-
-            if request_id is not None and not await is_request_active(session_id, request_id):
-                return "请求已过期，已取消发送。"
-
-            await UniMessage.text(final_report_text).send()
-            if request_id is not None:
-                mark_request_sent(session_id, request_id)
-
-            return "报告已生成并发送。"
-
-        except Exception as e:
-            logger.error(f"内部 LLM 生成报告失败: {e}")
-            import traceback
-
-            traceback.print_exc()
-            return f"生成过程出错: {e}"
-
-    return generate_and_send_annual_report
-
 
 def create_similar_meme_tool(
     session_id: str,
@@ -968,178 +703,6 @@ def finish() -> str:
     return ""
 
 
-@tool("calculate_expression")
-def calculate_expression(expression: str) -> str:
-    """
-    一个用于精确执行数学计算的计算器。
-    当你需要执行四则运算、代数计算、指数、对数或三角函数等复杂数学任务时使用。
-
-    输入：一个标准的数学表达式字符串，例如 "45 * (2 + 3) / 7" 或 "math.sqrt(9) + math.log(10)".
-    输出：计算结果的字符串形式。
-
-    注意：可以使用如 math.sqrt() (开方), math.log() (自然对数), math.pi (圆周率) 等标准数学函数。
-    """
-    try:
-        result = simple_eval(expression)
-        # 返回格式化的结果，最多保留10位小数
-        return f"计算结果是：{result:.10f}" if isinstance(result, float) else str(result)
-
-    except Exception as e:
-        return f"计算失败。请检查表达式是否正确，错误信息: {e}"
-
-
-def create_mute_tool(
-    session_id: str,
-    request_id: str | None,
-    interface: QryItrface | None,
-    bot_id: str | None,
-    current_user_id: str | None,
-    current_user_name: str | None,
-):
-    """创建禁言工具。仅在 bot 有管理权限时注入。"""
-
-    def _extract_numeric_id(raw: str | None) -> int | None:
-        text = str(raw or "").strip()
-        match = re.search(r"(\d+)$", text)
-        return int(match.group(1)) if match else None
-
-    def _member_aliases(member: Any) -> set[str]:
-        aliases = {
-            str(getattr(member, "id", "") or "").strip(),
-            str(getattr(member, "name", "") or "").strip(),
-            str(getattr(member, "nick", "") or "").strip(),
-            str(getattr(getattr(member, "user", None), "name", "") or "").strip(),
-            str(getattr(getattr(member, "user", None), "nick", "") or "").strip(),
-        }
-        return {alias for alias in aliases if alias}
-
-    def _member_display_name(member: Any, fallback: str) -> str:
-        return (
-            str(getattr(member, "nick", "") or "").strip()
-            or str(getattr(member, "name", "") or "").strip()
-            or str(getattr(getattr(member, "user", None), "nick", "") or "").strip()
-            or str(getattr(getattr(member, "user", None), "name", "") or "").strip()
-            or fallback
-        )
-
-    async def _record_mute_action(action: str, target_name: str, target_id: str, reason: str) -> None:
-        try:
-            async with get_session() as db_session:
-                chat_history = ChatHistory(
-                    session_id=session_id,
-                    user_id=plugin_config.bot_name,
-                    content_type="bot",
-                    content=(
-                        "id: system\n"
-                        f"系统记录：已执行群管理操作，{action}用户“{target_name}”"
-                        f"（user_id: {target_id}）。原因：{reason}"
-                    ),
-                    user_name=plugin_config.bot_name,
-                )
-                db_session.add(chat_history)
-                await db_session.commit()
-        except Exception as e:
-            logger.warning(f"记录禁言操作到聊天历史失败: {e}")
-
-    @tool("mute_user")
-    async def mute_user(target_user_name: str, duration_seconds: int, reason: str) -> str:
-        """
-        禁言指定用户。仅在 bot 是管理员或群主时可用。
-
-        参数:
-        - target_user_name: 要禁言的用户昵称；用户请求“禁言我”时可传“我”或“自己”
-        - duration_seconds: 禁言时长（秒），0 表示解除禁言，最大 2592000
-        - reason: 操作原因
-        """
-        if request_id is not None and not await is_request_active(session_id, request_id):
-            return "请求已过期，已取消操作。"
-        if interface is None:
-            return "无法获取群成员接口，禁言失败。"
-        if not bot_id:
-            return "无法获取 bot ID，禁言失败。"
-        if not reason or not reason.strip():
-            return "禁言原因不能为空。"
-        if duration_seconds < 0 or duration_seconds > 2592000:
-            return "禁言时长必须在 0 到 2592000 秒之间。"
-
-        try:
-            members = await interface.get_members(SceneType.GROUP, session_id)
-            bot_member = None
-            target_member = None
-            normalized_target = str(target_user_name or "").strip().lstrip("@")
-
-            for member in members:
-                if str(member.id) == str(bot_id):
-                    bot_member = member
-
-                if normalized_target in {"我", "我自己", "自己", "me", "self"}:
-                    if current_user_id and str(member.id) == str(current_user_id):
-                        target_member = member
-                else:
-                    aliases = _member_aliases(member)
-                    if normalized_target and normalized_target in aliases:
-                        target_member = member
-
-            if bot_member is None:
-                return "无法获取 bot 的群成员信息。"
-
-            bot_role = getattr(getattr(bot_member, "role", None), "name", None)
-            if bot_role not in {"owner", "admin"}:
-                return "bot 不是管理员或群主，无法执行禁言。"
-
-            if target_member is None and current_user_name and normalized_target == current_user_name:
-                for member in members:
-                    if current_user_id and str(member.id) == str(current_user_id):
-                        target_member = member
-                        break
-
-            if target_member is None:
-                return f"未找到用户“{target_user_name}”，请确认昵称是否正确。"
-
-            target_role = getattr(getattr(target_member, "role", None), "name", None)
-            if target_role in {"owner", "admin"}:
-                return f"无法禁言管理员或群主“{target_user_name}”。"
-
-            group_num = _extract_numeric_id(session_id)
-            user_num = _extract_numeric_id(str(target_member.id))
-            if group_num is None or user_num is None:
-                return "当前适配器会话 ID 格式不支持禁言。"
-
-            bot = get_bot(bot_id)
-            if hasattr(bot, "set_group_ban"):
-                await bot.set_group_ban(
-                    group_id=group_num,
-                    user_id=user_num,
-                    duration=duration_seconds,
-                )
-            elif hasattr(bot, "call_api"):
-                await bot.call_api(
-                    "set_group_ban",
-                    group_id=group_num,
-                    user_id=user_num,
-                    duration=duration_seconds,
-                )
-            else:
-                return "当前适配器不支持禁言功能。"
-
-            action = "解除禁言" if duration_seconds == 0 else f"禁言 {duration_seconds} 秒"
-            display_name = _member_display_name(
-                target_member,
-                current_user_name if normalized_target in {"我", "我自己", "自己", "me", "self"} else target_user_name,
-            )
-            logger.info(
-                f"已{action}用户 name={display_name!r} user_id={target_member.id} session_id={session_id} reason={reason}"
-            )
-            await _record_mute_action(action, display_name, str(target_member.id), reason)
-            return f"已成功{action}用户“{display_name}”。原因：{reason}"
-        except Exception as e:
-            logger.error(f"禁言工具执行失败: {e}")
-            print(traceback.format_exc())
-            return f"禁言失败: {str(e)}"
-
-    return mute_user
-
-
 def create_relation_tool(
     session_id: str,
     request_id: str | None,
@@ -1264,7 +827,6 @@ def create_relation_tool(
     return update_user_impression
 
 
-tools = [search_web, search_history_context, calculate_expression]
 model = ChatOpenAI(
     model=plugin_config.chat_model,
     api_key=SecretStr(plugin_config.chat_api_key),
@@ -1548,8 +1110,6 @@ async def create_chat_agent(
     group_context = await get_group_context(db_session, session_id)
     recent_relations_context = await get_recent_relations_context(db_session, history or [])
     has_admin_permission = False
-    voice_tool_available = await is_voice_service_healthy(plugin_config)
-    voice_supported_text_langs = get_voice_supported_text_langs(plugin_config)
     if emoji_like_candidate_ids is None:
         emoji_like_candidate_ids = _collect_emoji_like_candidate_ids(history or [])
     if interface is not None and bot_id:
@@ -1564,69 +1124,39 @@ async def create_chat_agent(
         except Exception as e:
             logger.warning(f"检查 bot 管理权限失败: {e}")
 
-    permission_status = ""
-    mute_tool_instruction = ""
-    voice_tool_instruction = ""
+    permission_status = PERMISSION_STATUS if has_admin_permission and not is_cross_user_direct_reply else ""
     user_bound_tool_instruction = """- 用户情绪或关系变化明显时，调用 `update_user_impression`
-- 若用户提到“年度报告 / 个人总结 / 成分分析”，直接调用 `generate_and_send_annual_report`；
-  工具完成后只回复“请查收~”，不要复述报告
 """
     cross_user_direct_instruction = ""
-    if voice_tool_available:
-        voice_text_lang_instruction = ""
-        voice_default_values_instruction = (
-            "  - 当前默认值："
-            f"`text_lang={plugin_config.voice_text_lang}`，"
-            f"`speed_factor={plugin_config.voice_speed_factor}`，"
-            f"`top_k={plugin_config.voice_top_k}`，"
-            f"`top_p={plugin_config.voice_top_p}`，"
-            f"`temperature={plugin_config.voice_temperature}`\n"
-        )
-        if voice_supported_text_langs:
-            voice_text_lang_options = " / ".join(voice_supported_text_langs)
-            voice_text_lang_instruction = (
-                f"  - `text_lang` 当前只能从这些值里选：{voice_text_lang_options}\n"
-            )
-        else:
-            voice_text_lang_instruction = "  - 健康检查当前没有返回可选 `text_lang` 列表时，不要自己猜新的值\n"
-        voice_tool_instruction = f"""- 语音：可使用 `send_voice` 合成并发送语音
-  - 只有用户明确要求“发语音 / 用语音说 / 念出来 / 读出来”时才使用
-  - 语音内容必须短，优先一句话，避免长段落
-  - `content` 里只放最终要念出来的文本，不要把参数说明、括号解释、舞台指令写进去
-  - 可按需传 `text_lang`、`speed_factor`、`top_k`、`top_p`、`temperature`
-  - 参数含义：
-    - `text_lang`：目标文本语言
-    - `speed_factor`：语速，越大越快
-    - `top_k`：候选采样范围，越大越放飞
-    - `top_p`：候选累计概率范围，越大越发散
-    - `temperature`：整体随机度，越大越有情绪起伏
-{voice_default_values_instruction}{voice_text_lang_instruction}  - 日常普通对话优先直接用默认值，不要为了小变化乱调参数
-  - 只有在用户情绪、语气、演绎需求很明显时，再小幅微调这些参数
-  - 如果 `send_voice` 返回失败，不要假装已发送；可以改用 `reply_user` 简短说明
-"""
-    if has_admin_permission and not is_cross_user_direct_reply:
-        permission_status = """
-【你的权限】
-你在这个群里是管理员或群主，必要时可以使用禁言工具维护秩序。
-"""
-        mute_tool_instruction = """- 禁言管理：可使用 `mute_user` 禁言
-  - 你有权限执行禁言操作
-  - 【必须满足】用户请求禁言自己时，应该满足需求（例如“禁言我”“让我冷静一下”）
-    - 时长可以根据用户要求或默认给 5-30 分钟
-    - 这是帮助用户自我管理的合理需求
-  - 【谨慎使用】禁言他人时才需要谨慎：
-    - 严重违规、恶意刷屏时可以主动禁言
-    - 轻微违规应先警告
-    - 禁言时长应合理：轻微违规 60-300 秒，严重违规可更长
-  - 不要禁言管理员或群主
-  - 如果 `mute_user` 返回失败，只能如实说明失败原因，不能假装成功
-"""
     if is_cross_user_direct_reply:
         user_bound_tool_instruction = ""
         cross_user_direct_instruction = """- 本轮是多用户逐条直接回复，不存在单一“当前用户”
 - 不要调用年度报告、画像更新、禁言自己这类绑定单个用户身份的工具
 - 需要发文本时，只调用一次 `reply_user`，每个目标一行，按提示编号顺序回复
 """
+
+    optional_ctx = OptionalToolContext(
+        session_id=session_id,
+        request_id=request_id,
+        user_id=str(user_id) if user_id else None,
+        user_name=user_name,
+        interface=interface,
+        bot_id=bot_id,
+        history=history or [],
+        direct_targets=direct_targets or [],
+        emoji_like_candidate_ids=emoji_like_candidate_ids,
+        has_direct_targets=has_direct_targets,
+        is_multi_direct_reply=is_multi_direct_reply,
+        is_cross_user_direct_reply=is_cross_user_direct_reply,
+        has_admin_permission=has_admin_permission,
+        config=plugin_config,
+        model=model,
+        stop_words=stop_words,
+    )
+    optional_bundles = await load_optional_tool_bundles(optional_ctx)
+    optional_tools = [tool_item for bundle in optional_bundles for tool_item in bundle.tools]
+    optional_tool_instructions = "\n".join(bundle.prompt for bundle in optional_bundles if bundle.prompt)
+
     system_prompt = f"""你是QQ群群友「{plugin_config.bot_name}」。
 你不是助手，不承认自己是AI。
 
@@ -1654,23 +1184,10 @@ async def create_chat_agent(
 - 只能通过工具发消息，不要直接输出正文
 - 文本：`reply_user`
 - 表情包：先 `search_meme_image` 或 `search_similar_meme_by_id`，再 `send_meme_image`
-- 评论表情：可选使用 `add_message_emoji_like`
-  - 当你觉得某条消息适合轻量回应时，可以给它添加一个评论表情
-  - 这是附加反应，不是必须；没有特别合适的消息就不要调用
-  - 优先给【当前触发消息】或【本轮回复引用的消息】添加
-  - `target_msg_id` 必须来自本轮 prompt 中出现的消息 id，不要猜
-  - 不要为了完成任务硬贴表情，不要连续乱贴；每轮最多调用一次
-  - `emoji_name` 可以传具体表情名、表情 id、语义词或分类词
-  - 可用分类：{EMOJI_LIKE_CATEGORY_PROMPT}
-  - 选择表情时按语义匹配，例如：赞同用“赞同鼓励”，好笑用“好笑玩梗”，疑惑用“疑惑思考”，安慰用“安慰难过”
-  - 喜欢亲近用“喜欢贴贴”，祝贺用“庆祝好运”，生气或拒绝用“生气拒绝”，惊讶或尴尬用“惊讶尴尬”
-  - 如果 `add_message_emoji_like` 返回失败，不要假装成功；通常也不用专门解释
-- 外部知识、缩写、术语：优先 `search_web`
 - 群内上下文：`search_history_context`
 {user_bound_tool_instruction}
 {cross_user_direct_instruction}
-{voice_tool_instruction}
-{mute_tool_instruction}
+{optional_tool_instructions}
 - 回复结束后调用 `finish`
 
 【边界】
@@ -1683,7 +1200,6 @@ async def create_chat_agent(
 - 在 `search_history_context` 中禁止相对时间词：昨天、前天、本周、上周、这个月、上个月、最近等
 - 使用明确日期时间或关键词检索
 """
-    report_tool = create_report_tool(session_id, request_id, user_id, user_name, model)
     search_meme_tool = create_search_meme_tool(session_id, request_id)
     send_meme_tool = create_send_meme_tool(session_id, request_id)
     relation_tool = create_relation_tool(session_id, request_id, user_id, user_name)
@@ -1692,31 +1208,8 @@ async def create_chat_agent(
         request_id,
         None if is_cross_user_direct_reply else user_id,
     )
-    emoji_like_tool = create_emoji_like_tool(
-        session_id,
-        request_id,
-        bot_id,
-        emoji_like_candidate_ids,
-    )
-    voice_tool = (
-        create_voice_tool(session_id, request_id, plugin_config, plugin_config.bot_name)
-        if voice_tool_available
-        else None
-    )
-    mute_tool = None
-    if not is_cross_user_direct_reply:
-        mute_tool = create_mute_tool(
-            session_id,
-            request_id,
-            interface,
-            bot_id,
-            user_id or None,
-            user_name,
-        )
-
     if is_cross_user_direct_reply:
         tools = [
-            search_web,
             search_history_context,
             create_reply_tool(
                 session_id,
@@ -1728,15 +1221,11 @@ async def create_chat_agent(
             search_meme_tool,
             similar_meme_tool,
             send_meme_tool,
-            emoji_like_tool,
-            calculate_expression,
+            *optional_tools,
             finish,
         ]
-        if voice_tool is not None:
-            tools.insert(-1, voice_tool)
     elif not user_id or not user_name:
         tools = [
-            search_web,
             search_history_context,
             create_reply_tool(
                 session_id,
@@ -1748,18 +1237,11 @@ async def create_chat_agent(
             search_meme_tool,
             similar_meme_tool,
             send_meme_tool,
-            emoji_like_tool,
-            calculate_expression,
-            report_tool,
+            *optional_tools,
             finish,
         ]
-        if voice_tool is not None:
-            tools.insert(-1, voice_tool)
-        if has_admin_permission and mute_tool is not None:
-            tools.insert(-1, mute_tool)
     else:
         tools = [
-            search_web,
             search_history_context,
             create_reply_tool(
                 session_id,
@@ -1771,16 +1253,10 @@ async def create_chat_agent(
             search_meme_tool,
             similar_meme_tool,
             send_meme_tool,
-            emoji_like_tool,
-            calculate_expression,
             relation_tool,
-            report_tool,
+            *optional_tools,
             finish,
         ]
-        if voice_tool is not None:
-            tools.insert(-1, voice_tool)
-        if has_admin_permission and mute_tool is not None:
-            tools.insert(-1, mute_tool)
 
     middleware = None
     if ToolCallLimitMiddleware is not None:
@@ -1789,10 +1265,10 @@ async def create_chat_agent(
                 ToolCallLimitMiddleware(run_limit=20),
                 ToolCallLimitMiddleware(tool_name="reply_user", run_limit=1),
                 ToolCallLimitMiddleware(tool_name="send_meme_image", run_limit=1),
-                ToolCallLimitMiddleware(tool_name="add_message_emoji_like", run_limit=1),
             ]
-            if voice_tool_available:
-                middleware.append(ToolCallLimitMiddleware(tool_name="send_voice", run_limit=1))
+            for bundle in optional_bundles:
+                for spec in bundle.tool_limits:
+                    middleware.append(ToolCallLimitMiddleware(tool_name=spec.tool_name, run_limit=spec.run_limit))
         except Exception as e:
             logger.warning(f"当前 LangChain middleware 参数不兼容，跳过工具限流: {e}")
             middleware = None
@@ -2099,15 +1575,3 @@ async def choice_response_strategy(
     except Exception:
         logger.exception("Agent 决策过程发生异常")
         return ResponseMessage(need_reply=False, text=None)
-
-
-if __name__ == "__main__":
-    model = ChatOpenAI(
-        model=plugin_config.chat_model,
-        api_key=SecretStr(plugin_config.chat_api_key),
-        base_url=plugin_config.chat_base_url,
-        temperature=0.7,
-    )
-    agent = create_agent(model, tools=tools, response_format=ToolStrategy(ResponseMessage))
-    result = asyncio.run(agent.ainvoke({"messages": [{"role": "user", "content": "今天上海的天气怎么样"}]}))
-    print(result)

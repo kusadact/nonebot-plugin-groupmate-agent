@@ -1106,12 +1106,18 @@ async def _build_bound_context(
     binding_notice: str | None = None
     if imgs:
         bound_images.extend(await _build_current_event_bound_images(imgs, event, bot, state))
+        if not bound_images:
+            disable_inline_history_images = True
+            binding_notice = (
+                "【图片绑定提示】本轮消息包含当前图片，但图片没有加载成功。"
+                "不要把最近历史图片当成这次问题指向的图片；如果需要图片内容，请直接说明图片未加载。"
+            )
     if reply_to_message_id:
         (
             reply_bound_messages,
             reply_bound_images,
-            disable_inline_history_images,
-            binding_notice,
+            reply_disable_inline_history_images,
+            reply_binding_notice,
         ) = await _build_reply_binding(
             db_session,
             session_id,
@@ -1121,6 +1127,10 @@ async def _build_bound_context(
         )
         bound_messages.extend(reply_bound_messages)
         bound_images.extend(reply_bound_images)
+        if reply_disable_inline_history_images:
+            disable_inline_history_images = True
+        if reply_binding_notice:
+            binding_notice = "\n".join(filter(None, [binding_notice, reply_binding_notice]))
     return bound_messages, bound_images, disable_inline_history_images, binding_notice
 
 

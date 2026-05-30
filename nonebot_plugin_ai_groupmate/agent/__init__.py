@@ -271,6 +271,7 @@ def create_reply_tool(
     session_id: str,
     request_id: str | None = None,
     interface: QryItrface | None = None,
+    bot_id: str | None = None,
     allow_reply_duplicates: bool = False,
     check_recent_duplicate: bool = True,
 ):
@@ -460,7 +461,7 @@ def create_reply_tool(
         async with get_session() as db_session:
             chat_history = ChatHistory(
                 session_id=session_id,
-                user_id=plugin_config.bot_name,
+                user_id=str(bot_id or plugin_config.bot_name),
                 content_type="bot",
                 content=f"id: {msg_id}\n" + content,
                 user_name=plugin_config.bot_name,
@@ -612,7 +613,11 @@ def create_search_meme_tool(session_id: str, request_id: str | None):
     return search_meme_image
 
 
-def create_send_meme_tool(session_id: str, request_id: str | None = None):
+def create_send_meme_tool(
+    session_id: str,
+    request_id: str | None = None,
+    bot_id: str | None = None,
+):
     """
     创建一个带上下文的表情包发送工具
 
@@ -676,7 +681,7 @@ def create_send_meme_tool(session_id: str, request_id: str | None = None):
                     mark_request_sent(session_id, request_id)
                 chat_history = ChatHistory(
                     session_id=session_id,
-                    user_id=plugin_config.bot_name,
+                    user_id=str(bot_id or plugin_config.bot_name),
                     content_type="bot",
                     content=f"id: {res.msg_ids[-1]['message_id']}\n发送了图片，图片描述是: {description}",
                     user_name=plugin_config.bot_name,
@@ -835,6 +840,27 @@ model = ChatOpenAI(
 )
 
 
+def _is_image_inspection_bad_request(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "data_inspection_failed",
+            "datainspectionfailed",
+            "inappropriate content",
+            "input image data may contain inappropriate content",
+        )
+    ) and any(
+        marker in text
+        for marker in (
+            "error code: 400",
+            "status code: 400",
+            "badrequest",
+            "bad request",
+        )
+    )
+
+
 async def get_user_relation_context(db_session, user_id: str, user_name: str | None) -> str:
     """获取用户关系上下文Prompt"""
     try:
@@ -911,6 +937,8 @@ async def get_recent_relations_context(
         seen: set[str] = set()
 
         for msg in reversed(history):
+            if msg.content_type == "bot":
+                continue
             uid = str(msg.user_id)
             if not uid or uid == plugin_config.bot_name:
                 continue
@@ -1201,7 +1229,7 @@ async def create_chat_agent(
 - 使用明确日期时间或关键词检索
 """
     search_meme_tool = create_search_meme_tool(session_id, request_id)
-    send_meme_tool = create_send_meme_tool(session_id, request_id)
+    send_meme_tool = create_send_meme_tool(session_id, request_id, bot_id)
     relation_tool = create_relation_tool(session_id, request_id, user_id, user_name)
     similar_meme_tool = create_similar_meme_tool(
         session_id,
@@ -1215,6 +1243,7 @@ async def create_chat_agent(
                 session_id,
                 request_id,
                 interface,
+                bot_id,
                 allow_reply_duplicates=is_multi_direct_reply,
                 check_recent_duplicate=False,
             ),
@@ -1231,6 +1260,7 @@ async def create_chat_agent(
                 session_id,
                 request_id,
                 interface,
+                bot_id,
                 allow_reply_duplicates=is_multi_direct_reply,
                 check_recent_duplicate=not has_direct_targets,
             ),
@@ -1247,6 +1277,7 @@ async def create_chat_agent(
                 session_id,
                 request_id,
                 interface,
+                bot_id,
                 allow_reply_duplicates=is_multi_direct_reply,
                 check_recent_duplicate=not has_direct_targets,
             ),
@@ -1299,6 +1330,7 @@ async def format_chat_history(
     bound_images: list[dict[str, str]] | None = None,
     disable_inline_history_images: bool = False,
     binding_notice: str | None = None,
+    omit_images: bool = False,
 ) -> list[BaseMessage]:
     """将最近图片以内联多模态格式喂给主模型，旧图片退化为文本。"""
     messages: list[BaseMessage] = []
@@ -1329,7 +1361,7 @@ async def format_chat_history(
         id_to_summary[own_id] = f'{display_name} "{snippet}"'
 
     image_indices = [i for i, m in enumerate(history) if m.content_type == "image"]
-    if bound_images or disable_inline_history_images:
+    if omit_images or bound_images or disable_inline_history_images:
         inline_image_set: set[int] = set()
     else:
         inline_image_set = set(image_indices[-max_inline_images:]) if max_inline_images > 0 else set()
@@ -1391,7 +1423,7 @@ async def format_chat_history(
                     )
                     continue
 
-            fallback = f"{prefix_text} [图片]"
+            fallback = f"{prefix_text} [{'图片已省略' if omit_images else '图片'}]"
             messages.append(HumanMessage(content=fallback))
 
     if binding_notice:
@@ -1409,7 +1441,7 @@ async def format_chat_history(
             lines.append(f"{idx}. [{type_label}{id_suffix}] {user_name}: {text}")
         messages.append(HumanMessage(content="\n".join(lines)))
 
-    if bound_images:
+    if bound_images and not omit_images:
         parts: list[dict[str, Any]] = [
             {
                 "type": "text",
@@ -1488,7 +1520,10 @@ async def choice_response_strategy(
         direct_targets = direct_targets or []
         latest_user_msg = next((msg for msg in reversed(history) if msg.content_type != "bot"), None)
         focus_notice = ""
-        reply_scope_instruction = "如果需要回复，默认只回应当前触发消息的发送者；除非当前消息明确要求，否则不要替其他人答话。"
+        reply_scope_instruction = (
+            "如果需要回复，默认只回应当前触发消息的发送者；"
+            "除非当前消息明确要求，否则不要替其他人答话。"
+        )
         emoji_like_candidates = _build_emoji_like_candidates(history)
         if direct_targets:
             focus_lines = ["【本轮需要逐条回复的消息】"]
@@ -1565,10 +1600,41 @@ async def choice_response_strategy(
 
         final_messages = chat_history_messages + [HumanMessage(content=prompt_text)]
         invoke_input: dict[str, Any] = {"messages": final_messages}
-        await agent.ainvoke(
-            cast(Any, invoke_input),
-            context=Context(session_id=session_id, request_id=request_id),
-        )
+        try:
+            await agent.ainvoke(
+                cast(Any, invoke_input),
+                context=Context(session_id=session_id, request_id=request_id),
+            )
+        except Exception as e:
+            if not _is_image_inspection_bad_request(e):
+                raise
+            logger.warning(
+                f"Agent 图片审核 400，移除图片后重试 session={session_id} request_id={request_id}: {e}"
+            )
+            text_only_messages = await format_chat_history(
+                db_session,
+                history,
+                user_roles=role_map,
+                bound_messages=bound_messages,
+                bound_images=[],
+                disable_inline_history_images=True,
+                binding_notice=binding_notice,
+                omit_images=True,
+            )
+            text_only_prompt = prompt_text.replace(
+                "如果是针对图片的消息，请结合图片内容回答。",
+                "如果是针对图片的消息，本轮图片已因内容审核被省略，只能结合文字、图片摘要或引用文字回答。",
+            ).replace(
+                "如果上文包含“【当前重点图片】”，优先围绕这些图片回答。",
+                "如果原消息包含图片但当前没有图片内容，请不要臆测图片细节。",
+            )
+            text_only_input: dict[str, Any] = {
+                "messages": text_only_messages + [HumanMessage(content=text_only_prompt)]
+            }
+            await agent.ainvoke(
+                cast(Any, text_only_input),
+                context=Context(session_id=session_id, request_id=request_id),
+            )
         await db_session.commit()
         return ResponseMessage(need_reply=False, text=None)
 

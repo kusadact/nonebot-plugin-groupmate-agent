@@ -63,7 +63,7 @@ def create_mute_tool(ctx: OptionalToolContext):
             async with get_session() as db_session:
                 chat_history = ChatHistory(
                     session_id=ctx.session_id,
-                    user_id=ctx.config.bot_name,
+                    user_id=str(ctx.bot_id or ctx.config.bot_name),
                     content_type="bot",
                     content=(
                         "id: system\n"

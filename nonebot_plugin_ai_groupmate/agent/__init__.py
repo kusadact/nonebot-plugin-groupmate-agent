@@ -38,8 +38,11 @@ from ..reply_guard import (
     clear_request_detached,
     clear_request_sent,
     is_request_active,
+    is_request_detached,
     mark_request_detached,
     mark_request_sent,
+    register_detached_task,
+    unregister_detached_task,
 )
 from .optional_tools import OptionalToolContext, load_optional_tool_bundles
 from .optional_tools.emoji_like import extract_emoji_like_message_id_text
@@ -1217,10 +1220,15 @@ async def create_chat_agent(
 
         def _clear_detached() -> None:
             clear_request_detached(session_id, request_id)
-            _schedule_detached_sent_cleanup()
+            if not is_request_detached(session_id, request_id):
+                _schedule_detached_sent_cleanup()
 
         def _create_detached_task(coro, reason: str):
-            _detach_request(reason)
+            register_detached_task(session_id, request_id)
+            logger.info(
+                f"请求已启动 detached 工具任务 session={session_id} "
+                f"request_id={request_id}: {reason}"
+            )
 
             async def _runner():
                 try:
@@ -1231,8 +1239,9 @@ async def create_chat_agent(
                     )
                     return None
                 finally:
-                    clear_request_detached(session_id, request_id)
-                    _schedule_detached_sent_cleanup()
+                    unregister_detached_task(session_id, request_id)
+                    if not is_request_detached(session_id, request_id):
+                        _schedule_detached_sent_cleanup()
 
             task = asyncio.create_task(_runner())
             _detached_tasks.add(task)

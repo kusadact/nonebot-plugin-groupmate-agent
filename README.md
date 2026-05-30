@@ -17,13 +17,14 @@
 核心能力包括：
 
 - 记忆能力：聊天历史检索、群体认知档案、关系维护
-- 聊天能力：群聊自动回复、主动发言、年度报告、禁言辅助
+- 聊天能力：群聊自动回复、主动发言、禁言辅助
 - 学习表情包能力：表情包识别、检索、发送、相似图搜索、自动拉黑
+- 扩展能力：用户可自行编写tools给agent使用
 
 `2.3.0` 主要变化：
 
 - 默认接入阿里云 DashScope / 通义千问，新增 `qwen_key` 作为通用 Key，收紧基础配置项
-- Agent 可选工具拆分为独立模块，联网搜索和语音会在健康检查通过后才注入 Agent prompt
+- Agent 可选工具拆分为独立模块，并支持从插件数据目录加载用户自定义工具；联网搜索会在健康检查通过后才注入 Agent prompt
 
 ## 💿 安装
 
@@ -58,8 +59,6 @@ plugins = ["nonebot_plugin_ai_groupmate"]
 | `ai_groupmate__qdrant_uri` | 空 | Qdrant 地址；不填则禁用 RAG / 表情包向量功能 |
 | `ai_groupmate__qdrant_api_key` | 空 | Qdrant API Key |
 | `ai_groupmate__tavily_api_key` | 空 | Tavily 搜索 API Key |
-| `ai_groupmate__voice_enabled` | `false` | 是否启用语音工具 |
-| `ai_groupmate__voice_base_url` | 空 | GPT-SoVITS 服务地址 |
 
 如果需要自定义各模型的 API 参数，可使用下面高级配置里的配置项。
 
@@ -89,12 +88,49 @@ plugins = ["nonebot_plugin_ai_groupmate"]
 | `ai_groupmate__remote_media_embedding_dimensions` | `2560` | 图片 embedding 维度 |
 | `ai_groupmate__media_search_recall_limit` | `6` | 表情包检索召回候选数 |
 | `ai_groupmate__media_search_return_limit` | `5` | 表情包检索最终返回数 |
-| `ai_groupmate__voice_text_lang` | `zh` | 目标文本语言 |
-| `ai_groupmate__voice_speed_factor` | `1.0` | 语速 |
-| `ai_groupmate__voice_top_k` | `15` | GPT-SoVITS top_k |
-| `ai_groupmate__voice_top_p` | `1.0` | GPT-SoVITS top_p |
-| `ai_groupmate__voice_temperature` | `1.0` | GPT-SoVITS temperature |
+| `ai_groupmate__voice_enabled` | `false` | 是否启用语音用户工具 |
+| `ai_groupmate__voice_base_url` | 空 | GPT-SoVITS 服务地址，供语音用户工具使用 |
+| `ai_groupmate__voice_text_lang` | `zh` | 语音用户工具目标文本语言 |
+| `ai_groupmate__voice_speed_factor` | `1.0` | 语音用户工具语速 |
+| `ai_groupmate__voice_top_k` | `15` | 语音用户工具 GPT-SoVITS top_k |
+| `ai_groupmate__voice_top_p` | `1.0` | 语音用户工具 GPT-SoVITS top_p |
+| `ai_groupmate__voice_temperature` | `1.0` | 语音用户工具 GPT-SoVITS temperature |
 
+</details>
+
+<details>
+<summary>自定义 Agent 工具</summary>
+
+用户自定义工具应放在 bot 数据目录下的 `data/nonebot_plugin_ai_groupmate/tools`。
+
+支持两种文件形式：
+
+- `data/nonebot_plugin_ai_groupmate/tools/my_tool.py`
+- `data/nonebot_plugin_ai_groupmate/tools/my_tool/__init__.py`
+
+工具模块需要提供 `build(ctx)`，可选提供 `healthcheck(ctx)`；健康检查返回不通过时，该工具和它的 prompt 都不会注入 Agent。
+
+```python
+from langchain.tools import tool
+from nonebot_plugin_ai_groupmate.agent.optional_tools import OptionalToolBundle, OptionalToolContext
+
+
+async def healthcheck(ctx: OptionalToolContext) -> tuple[bool, str]:
+    return True, "ok"
+
+
+async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
+    @tool
+    async def my_tool(text: str) -> str:
+        """工具说明会提供给模型。"""
+        return text
+
+    return OptionalToolBundle(
+        name="my_tool",
+        tools=[my_tool],
+        prompt="- 需要调用 my_tool 时，优先给出明确的 text 参数",
+    )
+```
 </details>
 
 ## ✨ 当前分支能力
@@ -102,8 +138,8 @@ plugins = ["nonebot_plugin_ai_groupmate"]
 - **群聊 Agent**
   - 基于 LangChain Agent + Tool Calling 驱动群聊回复，主对话模型使用 OpenAI 兼容接口
   - 默认使用阿里云 DashScope / 通义千问；主对话、总结、多模态和图片 embedding 已内置默认模型和地址，填写 `qwen_key` 即可使用
-  - 联网搜索、年度报告、消息评论表情、语音、禁言和计算器已拆为 Agent 可选工具模块；联网搜索和语音不健康时不会注入工具和 prompt
-  - 支持联网搜索、历史聊天检索、表情包搜索/发送、消息评论表情、语音发送、年度报告、关系更新和禁言管理；语音工具支持 GPT-SoVITS 接口，健康检查通过时才会注入 Agent，插件直接发送 API 返回的音频
+  - 联网搜索、消息评论表情、禁言和计算器已拆为内置 Agent 可选工具模块；用户自定义工具从 `data/nonebot_plugin_ai_groupmate/tools` 加载；联网搜索不健康时不会注入工具和 prompt
+  - 支持联网搜索、历史聊天检索、表情包搜索/发送、消息评论表情、关系更新和禁言管理；放入对应用户工具后可扩展更多能力
   - 每个群只保留最新待处理回复请求，旧请求会被取消
   - 直接 @/回复 场景会按编号聚合处理，逐条回复，不会互相抢上下文
   - 工具调用带 `request_id` 过期保护，旧请求不会继续搜索、发消息或更新关系

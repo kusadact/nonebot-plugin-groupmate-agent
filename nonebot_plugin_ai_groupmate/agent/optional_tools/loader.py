@@ -1,16 +1,20 @@
+import importlib.util
 import inspect
+import re
+import sys
+from pathlib import Path
+from types import ModuleType
 from typing import Any
 
+from nonebot import require
 from nonebot.log import logger
 
-from . import calculator, emoji_like, moderation, report, voice, web_search
+from . import calculator, emoji_like, moderation, web_search
 from .types import OptionalToolBundle, OptionalToolContext
 
-OPTIONAL_TOOL_MODULES = [
+BUILTIN_TOOL_MODULES = [
     web_search,
-    report,
     emoji_like,
-    voice,
     moderation,
     calculator,
 ]
@@ -22,25 +26,124 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
-async def load_optional_tool_bundles(ctx: OptionalToolContext) -> list[OptionalToolBundle]:
-    bundles: list[OptionalToolBundle] = []
+def get_user_tools_dir() -> Path:
+    require("nonebot_plugin_localstore")
+    import nonebot_plugin_localstore as store
 
-    for module in OPTIONAL_TOOL_MODULES:
-        name = module.__name__.rsplit(".", 1)[-1]
+    tools_dir = store.get_data_dir("nonebot_plugin_ai_groupmate") / "tools"
+    tools_dir.mkdir(parents=True, exist_ok=True)
+    return tools_dir
+
+
+def _module_display_name(module: ModuleType) -> str:
+    tool_name = getattr(module, "__ai_groupmate_tool_name__", None)
+    if tool_name:
+        return str(tool_name)
+    return module.__name__.rsplit(".", 1)[-1]
+
+
+def _safe_module_name(name: str) -> str:
+    return re.sub(r"\W+", "_", name).strip("_") or "tool"
+
+
+def _iter_user_tool_paths(tools_dir: Path) -> list[Path]:
+    if not tools_dir.exists():
+        return []
+
+    tool_paths: list[Path] = []
+    for entry in sorted(tools_dir.iterdir(), key=lambda item: item.name):
+        if entry.name.startswith(("_", ".")):
+            continue
+        if entry.is_file() and entry.suffix == ".py":
+            tool_paths.append(entry)
+        elif entry.is_dir() and (entry / "__init__.py").is_file():
+            tool_paths.append(entry / "__init__.py")
+    return tool_paths
+
+
+def _load_user_tool_module(path: Path) -> ModuleType | None:
+    tool_name = path.parent.name if path.name == "__init__.py" else path.stem
+    module_name = f"_ai_groupmate_user_tool_{_safe_module_name(tool_name)}"
+    search_locations = [str(path.parent)] if path.name == "__init__.py" else None
+    spec = importlib.util.spec_from_file_location(module_name, path, submodule_search_locations=search_locations)
+    if spec is None or spec.loader is None:
+        logger.warning(f"跳过用户 Agent 工具 {path}: 无法创建模块 spec")
+        return None
+
+    for loaded_name in list(sys.modules):
+        if loaded_name == module_name or loaded_name.startswith(f"{module_name}."):
+            sys.modules.pop(loaded_name, None)
+
+    module = importlib.util.module_from_spec(spec)
+    module.__ai_groupmate_tool_name__ = tool_name
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        logger.exception(f"加载用户 Agent 工具失败: {path}")
+        return None
+    return module
+
+
+def _load_user_tool_modules() -> list[ModuleType]:
+    tools_dir = get_user_tools_dir()
+    modules: list[ModuleType] = []
+    for path in _iter_user_tool_paths(tools_dir):
+        module = _load_user_tool_module(path)
+        if module is not None:
+            modules.append(module)
+    return modules
+
+
+async def _build_optional_tool_bundle(
+    module: ModuleType,
+    ctx: OptionalToolContext,
+    *,
+    source: str,
+) -> OptionalToolBundle | None:
+    name = _module_display_name(module)
+    try:
         healthcheck = getattr(module, "healthcheck", None)
         if healthcheck is not None:
             ok, reason = await _maybe_await(healthcheck(ctx))
             if not ok:
                 logger.info(f"跳过可选 Agent 工具 {name}: {reason}")
-                continue
+                return None
 
         builder = getattr(module, "build", None)
         if builder is None:
-            logger.warning(f"可选 Agent 工具模块缺少 build(): {module.__name__}")
-            continue
+            logger.warning(f"可选 Agent 工具模块缺少 build(): {source}")
+            return None
 
         bundle = await _maybe_await(builder(ctx))
-        if bundle.tools or bundle.prompt or bundle.tool_limits:
+    except Exception:
+        logger.exception(f"加载可选 Agent 工具失败: {source}")
+        return None
+
+    if not isinstance(bundle, OptionalToolBundle):
+        logger.warning(f"可选 Agent 工具 build() 返回值不是 OptionalToolBundle: {source}")
+        return None
+    if not (bundle.tools or bundle.prompt or bundle.tool_limits):
+        return None
+    return bundle
+
+
+async def load_optional_tool_bundles(ctx: OptionalToolContext) -> list[OptionalToolBundle]:
+    bundles: list[OptionalToolBundle] = []
+
+    for module in BUILTIN_TOOL_MODULES:
+        bundle = await _build_optional_tool_bundle(module, ctx, source=module.__name__)
+        if bundle is not None:
+            bundles.append(bundle)
+
+    for module in _load_user_tool_modules():
+        bundle = await _build_optional_tool_bundle(
+            module,
+            ctx,
+            source=getattr(module, "__file__", module.__name__),
+        )
+        if bundle is not None:
             bundles.append(bundle)
 
     return bundles

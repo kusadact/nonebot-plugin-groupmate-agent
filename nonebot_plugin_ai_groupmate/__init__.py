@@ -46,7 +46,12 @@ from .utils import (
 )
 from .config import Config
 from .memory import DB
-from .reply_guard import clear_request_sent, has_request_sent, set_latest_request_id
+from .reply_guard import (
+    clear_request_sent,
+    has_request_sent,
+    is_request_detached,
+    set_latest_request_id,
+)
 from .agent.optional_tools import OptionalToolContext, list_optional_tool_statuses
 
 __plugin_meta__ = PluginMetadata(
@@ -323,7 +328,8 @@ async def _run_group_reply_worker(group_id: str) -> None:
                                 state.latest = followup_request
             request = None
     except asyncio.CancelledError:
-        if request and request.is_direct and has_request_sent(group_id, request.request_id):
+        request_detached = bool(request and is_request_detached(group_id, request.request_id))
+        if request and request.is_direct and (has_request_sent(group_id, request.request_id) or request_detached):
             async with _group_reply_state_lock:
                 state = _group_reply_states.get(group_id)
                 if state:
@@ -348,7 +354,8 @@ async def _run_group_reply_worker(group_id: str) -> None:
             if state.latest is not None:
                 _start_group_reply_worker_locked(group_id, state)
         for request_id in handled_request_ids:
-            clear_request_sent(group_id, request_id)
+            if not is_request_detached(group_id, request_id):
+                clear_request_sent(group_id, request_id)
 
 
 def _extract_model_text(content: Any) -> str:

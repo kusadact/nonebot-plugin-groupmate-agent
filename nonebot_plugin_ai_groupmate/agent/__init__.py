@@ -33,7 +33,14 @@ from ..config import Config
 from ..favorability import apply_favorability_change_detailed
 from ..memory import DB
 from ..model import ChatHistory, ChatHistorySchema, GroupMemory, MediaStorage, UserRelation
-from ..reply_guard import is_request_active, mark_request_sent
+from ..reply_guard import (
+    can_request_continue,
+    clear_request_detached,
+    clear_request_sent,
+    is_request_active,
+    mark_request_detached,
+    mark_request_sent,
+)
 from .optional_tools import OptionalToolContext, load_optional_tool_bundles
 from .optional_tools.emoji_like import extract_emoji_like_message_id_text
 from .optional_tools.moderation import PERMISSION_STATUS
@@ -48,6 +55,10 @@ plugin_path = Path(__file__).parent
 plugin_config = get_plugin_config(Config).ai_groupmate
 with open(Path(__file__).parent.parent / "stop_words.txt", encoding="utf-8") as f:
     stop_words = f.read().splitlines() + ["id", "回复"]
+
+_detached_tasks: set[asyncio.Task[Any]] = set()
+_DETACHED_SENT_CLEANUP_DELAY_SECONDS = 600.0
+
 
 @dataclass
 class Context:
@@ -1181,6 +1192,58 @@ async def create_chat_agent(
         model=model,
         stop_words=stop_words,
     )
+    if request_id is not None:
+
+        def _schedule_detached_sent_cleanup() -> None:
+            asyncio.get_running_loop().call_later(
+                _DETACHED_SENT_CLEANUP_DELAY_SECONDS,
+                clear_request_sent,
+                session_id,
+                request_id,
+            )
+
+        def _detach_request(reason: str) -> None:
+            mark_request_detached(session_id, request_id)
+            logger.info(
+                f"请求已进入 detached 工具生命周期 session={session_id} "
+                f"request_id={request_id}: {reason}"
+            )
+
+        async def _can_continue() -> bool:
+            return await can_request_continue(session_id, request_id)
+
+        def _mark_sent() -> None:
+            mark_request_sent(session_id, request_id)
+
+        def _clear_detached() -> None:
+            clear_request_detached(session_id, request_id)
+            _schedule_detached_sent_cleanup()
+
+        def _create_detached_task(coro, reason: str):
+            _detach_request(reason)
+
+            async def _runner():
+                try:
+                    return await coro
+                except Exception:
+                    logger.exception(
+                        f"detached 工具任务失败 session={session_id} request_id={request_id}: {reason}"
+                    )
+                    return None
+                finally:
+                    clear_request_detached(session_id, request_id)
+                    _schedule_detached_sent_cleanup()
+
+            task = asyncio.create_task(_runner())
+            _detached_tasks.add(task)
+            task.add_done_callback(_detached_tasks.discard)
+            return task
+
+        optional_ctx.detach_request = _detach_request
+        optional_ctx.can_continue = _can_continue
+        optional_ctx.mark_sent = _mark_sent
+        optional_ctx.clear_detached = _clear_detached
+        optional_ctx.create_detached_task = _create_detached_task
     optional_bundles = await load_optional_tool_bundles(optional_ctx)
     optional_tools = [tool_item for bundle in optional_bundles for tool_item in bundle.tools]
     optional_tool_instructions = "\n".join(bundle.prompt for bundle in optional_bundles if bundle.prompt)

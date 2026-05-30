@@ -131,6 +131,33 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
         prompt="- 需要调用 my_tool 时，优先给出明确的 text 参数",
     )
 ```
+
+长耗时工具可以在确认任务已经开始后使用 detached 生命周期，避免同一群的新请求取消后台任务：
+
+```python
+async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
+    async def run_long_job(prompt: str) -> None:
+        # 执行耗时任务，例如生成图片。
+        result = await generate_image(prompt)
+        if ctx.can_continue and not await ctx.can_continue():
+            return
+        await send_result(result)
+        if ctx.mark_sent:
+            ctx.mark_sent()
+
+    @tool
+    async def generate_image_tool(prompt: str) -> str:
+        """提交图片生成任务。"""
+        if ctx.create_detached_task:
+            ctx.create_detached_task(run_long_job(prompt), "image generation")
+            return "图片生成任务已开始，完成后会发送结果。"
+        return "当前请求不支持后台长任务。"
+
+    return OptionalToolBundle(name="image_tool", tools=[generate_image_tool])
+```
+
+`ctx.create_detached_task(...)` 会负责注册 detached 状态、记录异常并在后台任务结束后清理状态。
+不要只调用 `ctx.detach_request(...)` 后继续在当前工具协程里 `await` 长任务；当前 Agent worker 仍可能被取消。
 </details>
 
 ## ✨ 当前分支能力

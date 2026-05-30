@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,3 +35,8 @@ class OptionalToolContext:
     config: Any
     model: Any
     stop_words: list[str]
+    detach_request: Callable[[str], None] | None = None
+    can_continue: Callable[[], Awaitable[bool]] | None = None
+    mark_sent: Callable[[], None] | None = None
+    clear_detached: Callable[[], None] | None = None
+    create_detached_task: Callable[[Coroutine[Any, Any, Any], str], Any] | None = None

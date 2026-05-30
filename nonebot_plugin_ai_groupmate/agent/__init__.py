@@ -34,8 +34,8 @@ from ..favorability import apply_favorability_change_detailed
 from ..memory import DB
 from ..model import ChatHistory, ChatHistorySchema, GroupMemory, MediaStorage, UserRelation
 from ..reply_guard import is_request_active, mark_request_sent
-from .emoji_like import extract_emoji_like_message_id_text
 from .optional_tools import OptionalToolContext, load_optional_tool_bundles
+from .optional_tools.emoji_like import extract_emoji_like_message_id_text
 from .optional_tools.moderation import PERMISSION_STATUS
 
 require("nonebot_plugin_localstore")

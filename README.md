@@ -197,6 +197,10 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
 3. 回复内容包含 `不可以 / 不行 / 不能 / 别发 / 别再发 / 不要这张` 等否定反馈
 4. 该表情包会被标记为黑名单，并从后续检索中排除
 
+## ✅ 代办清单
+
+- [ ] 将主 Agent 的图片安全错误识别抽象成 provider-neutral 逻辑，避免偏向单一模型供应商的错误码。
+
 ## 🙏 致谢
 
 - 原项目：[`yaowan233/nonebot-plugin-ai-groupmate`](https://github.com/yaowan233/nonebot-plugin-ai-groupmate)

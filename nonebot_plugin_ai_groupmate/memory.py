@@ -247,7 +247,7 @@ class RemoteModelClient:
     def embed_media_texts(self, texts: list[str]) -> dict[str, list[Any]]:
         if not self.media_embedding_base_url:
             raise RuntimeError("remote_media_embedding_base_url is empty")
-        if self.media_embedding_provider == "aliyun_dashscope":
+        if self.media_embedding_provider == "dashscope":
             items = [{"text": text} for text in texts]
             return self._post_dashscope_media_embeddings(items)
         return self._post_embeddings(
@@ -261,7 +261,7 @@ class RemoteModelClient:
     def embed_media_images_base64(self, images_base64: list[str]) -> dict[str, list[Any]]:
         if not self.media_embedding_base_url:
             raise RuntimeError("remote_media_embedding_base_url is empty")
-        if self.media_embedding_provider == "aliyun_dashscope":
+        if self.media_embedding_provider == "dashscope":
             items = [{"image": self._to_dashscope_image(f"data:image/png;base64,{item}")} for item in images_base64]
             return self._post_dashscope_media_embeddings(items)
         inputs = [self._build_image_input(item) for item in images_base64]
@@ -282,7 +282,7 @@ class RemoteModelClient:
         if not self.media_rerank_model:
             raise RuntimeError("remote_media_rerank_model is empty")
 
-        if self.media_rerank_provider == "aliyun_dashscope":
+        if self.media_rerank_provider == "dashscope":
             dashscope_query: dict[str, str] | None = None
             if isinstance(query, str) and query.strip():
                 dashscope_query = {"text": query.strip()}
@@ -589,7 +589,7 @@ class VectorDBOperator:
             return []
         if not self.remote_client or not self.remote_client.has_media_rerank() or len(ordered_ids) <= 1:
             return ordered_ids[:MEDIA_SEARCH_RETURN_LIMIT]
-        if self.remote_client.media_rerank_provider == "aliyun_dashscope" and not isinstance(query, str):
+        if self.remote_client.media_rerank_provider == "dashscope" and not isinstance(query, str):
             return ordered_ids[:MEDIA_SEARCH_RETURN_LIMIT]
 
         records = await self._get_media_records(ordered_ids)

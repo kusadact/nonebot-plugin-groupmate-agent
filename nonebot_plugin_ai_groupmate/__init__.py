@@ -120,12 +120,12 @@ class GroupReplyState:
     running: bool = False
     queue: list[ReplyRequest] = field(default_factory=list)
     task: asyncio.Task | None = None
-    running_request_is_direct: bool = False
-    running_request_id: str | None = None
+    active_direct_request_ids: set[str] = field(default_factory=set)
 
 
 _group_reply_states: dict[str, GroupReplyState] = {}
 _group_reply_state_lock = asyncio.Lock()
+_direct_reply_tasks: set[asyncio.Task[Any]] = set()
 
 
 def _build_direct_reply_context(
@@ -167,9 +167,55 @@ def _start_group_reply_worker_locked(group_id: str, state: GroupReplyState) -> N
     state.task = asyncio.create_task(_run_group_reply_worker(group_id))
 
 
+async def _execute_reply_request(group_id: str, request: ReplyRequest) -> None:
+    await mark_request_active(group_id, request.request_id)
+    try:
+        async with get_session() as reply_session:
+            await handle_reply_logic(
+                reply_session,
+                request.request_id,
+                request.session,
+                request.interface,
+                request.bot_name,
+                request.bot_id,
+                request.user_id,
+                request.user_name,
+                request.is_tome,
+                request.bound_messages,
+                request.bound_images,
+                request.disable_inline_history_images,
+                request.binding_notice,
+                request.direct_targets,
+            )
+    finally:
+        await clear_request_active(group_id, request.request_id)
+        if not is_request_detached(group_id, request.request_id):
+            clear_request_sent(group_id, request.request_id)
+
+
+async def _run_direct_reply_task(group_id: str, request: ReplyRequest) -> None:
+    try:
+        await _execute_reply_request(group_id, request)
+    except asyncio.CancelledError:
+        logger.info(f"群 {group_id} 直接回复任务被取消 request_id={request.request_id}")
+    except Exception:
+        logger.exception(f"群 {group_id} 直接回复任务异常 request_id={request.request_id}")
+    finally:
+        async with _group_reply_state_lock:
+            state = _group_reply_states.get(group_id)
+            if state:
+                state.active_direct_request_ids.discard(request.request_id)
+
+
+def _start_direct_reply_task_locked(group_id: str, state: GroupReplyState, request: ReplyRequest) -> None:
+    state.active_direct_request_ids.add(request.request_id)
+    task = asyncio.create_task(_run_direct_reply_task(group_id, request))
+    _direct_reply_tasks.add(task)
+    task.add_done_callback(_direct_reply_tasks.discard)
+
+
 async def _run_group_reply_worker(group_id: str) -> None:
     request: ReplyRequest | None = None
-    handled_request_ids: set[str] = set()
     try:
         while True:
             request = None
@@ -179,35 +225,16 @@ async def _run_group_reply_worker(group_id: str) -> None:
                     return
                 if state.queue:
                     request = state.queue.pop(0)
-                state.running_request_is_direct = bool(request and request.is_direct)
-                state.running_request_id = request.request_id if request else None
 
             if request is None:
                 break
 
-            await mark_request_active(group_id, request.request_id)
-            handled_request_ids.add(request.request_id)
-            async with get_session() as reply_session:
-                await handle_reply_logic(
-                    reply_session,
-                    request.request_id,
-                    request.session,
-                    request.interface,
-                    request.bot_name,
-                    request.bot_id,
-                    request.user_id,
-                    request.user_name,
-                    request.is_tome,
-                    request.bound_messages,
-                    request.bound_images,
-                    request.disable_inline_history_images,
-                    request.binding_notice,
-                    request.direct_targets,
-                )
-            await clear_request_active(group_id, request.request_id)
+            await _execute_reply_request(group_id, request)
             request = None
     except asyncio.CancelledError:
         raise
+    except Exception:
+        logger.exception(f"群 {group_id} 普通回复 worker 异常")
     finally:
         async with _group_reply_state_lock:
             state = _group_reply_states.get(group_id)
@@ -215,14 +242,8 @@ async def _run_group_reply_worker(group_id: str) -> None:
                 return
             state.running = False
             state.task = None
-            state.running_request_is_direct = False
-            state.running_request_id = None
             if state.queue:
                 _start_group_reply_worker_locked(group_id, state)
-        for request_id in handled_request_ids:
-            await clear_request_active(group_id, request_id)
-            if not is_request_detached(group_id, request_id):
-                clear_request_sent(group_id, request_id)
 
 
 def _extract_model_text(content: Any) -> str:
@@ -1508,9 +1529,11 @@ async def handle_message(
         )
         async with _group_reply_state_lock:
             reply_state = _group_reply_states.setdefault(group_id, GroupReplyState())
-            if not is_direct and (
-                reply_state.running_request_is_direct or any(item.is_direct for item in reply_state.queue)
-            ):
+            if is_direct:
+                _start_direct_reply_task_locked(group_id, reply_state, request)
+                logger.debug(f"群 {group_id} 直接触发请求已启动独立 Agent task")
+                return
+            if reply_state.active_direct_request_ids:
                 logger.debug(f"群 {group_id} 有直接触发待处理，跳过普通概率回复")
                 return
             if not is_direct and sum(1 for item in reply_state.queue if not item.is_direct) >= _MAX_NORMAL_REPLY_QUEUE_SIZE:
@@ -1522,7 +1545,7 @@ async def handle_message(
                     logger.warning(f"群 {group_id} 回复状态异常（running=True 但 worker 不可用），已重启")
                     _start_group_reply_worker_locked(group_id, reply_state)
                 else:
-                    logger.debug(f"群 {group_id} 新请求已入队，等待当前回复完成")
+                    logger.debug(f"群 {group_id} 普通概率回复已入队，等待当前普通回复完成")
             else:
                 _start_group_reply_worker_locked(group_id, reply_state)
 

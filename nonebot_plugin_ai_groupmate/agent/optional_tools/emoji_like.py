@@ -6,7 +6,7 @@ from langchain.tools import tool
 from nonebot import get_bot
 from nonebot.log import logger
 
-from ...reply_guard import is_request_active
+from ...reply_guard import can_request_continue
 from .types import OptionalToolBundle, OptionalToolContext, ToolLimitSpec
 
 
@@ -481,7 +481,7 @@ def create_emoji_like_tool(
         - emoji_name: 可选，可传具体表情名、表情 id、语义词或分类词。
         - reason: 可选，为什么给这条消息添加这个评论表情。
         """
-        if request_id is not None and not await is_request_active(session_id, request_id):
+        if request_id is not None and not await can_request_continue(session_id, request_id):
             return "请求已过期，已取消评论表情。"
         if not bot_id:
             return "无法获取 bot ID，评论表情失败。"
@@ -500,7 +500,7 @@ def create_emoji_like_tool(
             if not hasattr(bot, "call_api"):
                 return "当前适配器不支持评论表情功能。"
 
-            if request_id is not None and not await is_request_active(session_id, request_id):
+            if request_id is not None and not await can_request_continue(session_id, request_id):
                 return "请求已过期，已取消评论表情。"
 
             await bot.call_api(

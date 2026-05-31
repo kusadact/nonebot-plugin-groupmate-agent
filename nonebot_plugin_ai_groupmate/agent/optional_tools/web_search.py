@@ -4,7 +4,7 @@ from langchain.tools import ToolRuntime, tool
 from langchain_tavily import TavilySearch
 from nonebot.log import logger
 
-from ...reply_guard import is_request_active
+from ...reply_guard import can_request_continue
 from .types import OptionalToolBundle, OptionalToolContext
 
 PROMPT = "- 外部知识、缩写、术语：优先 `search_web`"
@@ -26,7 +26,7 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
         输入：需要搜索的内容。
         """
         runtime_context = runtime.context
-        if runtime_context.request_id is not None and not await is_request_active(
+        if runtime_context.request_id is not None and not await can_request_continue(
             runtime_context.session_id, runtime_context.request_id
         ):
             return "请求已过期，已取消搜索。"

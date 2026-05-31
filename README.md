@@ -135,6 +135,9 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
 长耗时工具可以在确认任务已经开始后使用 detached 生命周期，避免同一群的新请求取消后台任务：
 
 ```python
+LONG_RUNNING_TRIGGERS = ["生成图片", "画图", "做图"]
+
+
 async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
     async def run_long_job(prompt: str) -> None:
         # 执行耗时任务，例如生成图片。
@@ -156,6 +159,7 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
     return OptionalToolBundle(name="image_tool", tools=[generate_image_tool])
 ```
 
+`LONG_RUNNING_TRIGGERS` 是可选的模块级声明。用户直接 @bot 发起并命中这些关键词时，主 Agent 会在决策和 RAG 阶段保护该请求，不会被普通同群新消息取消；新的直达长任务请求仍可替换旧请求。
 `ctx.create_detached_task(...)` 会负责注册 detached 状态、记录异常并在后台任务结束后清理状态。
 不要只调用 `ctx.detach_request(...)` 后继续在当前工具协程里 `await` 长任务；当前 Agent worker 仍可能被取消。
 </details>

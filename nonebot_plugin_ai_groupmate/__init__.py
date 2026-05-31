@@ -47,12 +47,15 @@ from .utils import (
 from .config import Config
 from .memory import DB
 from .reply_guard import (
+    clear_request_protected_long_intent,
     clear_request_sent,
     has_request_sent,
     is_request_detached,
+    is_request_protected_long_intent,
+    mark_request_protected_long_intent,
     set_latest_request_id,
 )
-from .agent.optional_tools import OptionalToolContext, list_optional_tool_statuses
+from .agent.optional_tools import OptionalToolContext, get_long_running_triggers, list_optional_tool_statuses
 
 __plugin_meta__ = PluginMetadata(
     name="nonebot-plugin-ai-groupmate",
@@ -72,6 +75,34 @@ with open(Path(__file__).parent / "stop_words.txt", encoding="utf-8") as f:
     stop_words = f.read().splitlines() + ["id", "回复"]
 
 _MAX_DIRECT_REPLY_TARGETS = 3
+_DEFAULT_LONG_RUNNING_TRIGGERS = [
+    "生成图片",
+    "生成图",
+    "生成一张图片",
+    "生成一张图",
+    "生图",
+    "画图",
+    "画一张",
+    "画个",
+    "绘图",
+    "做图",
+    "做个图",
+    "做一张图",
+    "p图",
+    "P图",
+    "p一下",
+    "P一下",
+    "改图",
+    "修图",
+    "头像生成",
+    "生成头像",
+    "生成报告",
+    "年度报告",
+    "生成语音",
+    "生成音频",
+    "配音",
+]
+_long_running_triggers_cache: list[str] | None = None
 
 
 class PermanentMultimodalError(Exception):
@@ -114,6 +145,7 @@ class DirectReplyTarget:
     bound_images: list[dict[str, str]]
     disable_inline_history_images: bool
     binding_notice: str | None
+    protected_long_intent: bool = False
 
 
 @dataclass
@@ -131,6 +163,7 @@ class ReplyRequest:
     bound_images: list[dict[str, str]]
     disable_inline_history_images: bool
     binding_notice: str | None
+    protected_long_intent: bool = False
     direct_targets: list[dict[str, Any]] = field(default_factory=list)
     raw_direct_targets: list[DirectReplyTarget] = field(default_factory=list)
 
@@ -142,6 +175,7 @@ class GroupReplyState:
     task: asyncio.Task | None = None
     running_request_is_direct: bool = False
     running_request_id: str | None = None
+    running_request_protected_long_intent: bool = False
     pending_direct_targets: list[DirectReplyTarget] = field(default_factory=list)
 
 
@@ -223,6 +257,7 @@ def _refresh_direct_request_locked(request: ReplyRequest, state: GroupReplyState
         request.binding_notice,
     ) = _build_direct_reply_context(state.pending_direct_targets)
     request.raw_direct_targets = selected_targets
+    request.protected_long_intent = any(target.protected_long_intent for target in selected_targets)
     if selected_targets:
         newest_target = selected_targets[0]
         target_user_ids = {target.user_id for target in selected_targets if target.user_id}
@@ -256,9 +291,81 @@ def _upsert_pending_direct_target(state: GroupReplyState, target: DirectReplyTar
         state.pending_direct_targets = state.pending_direct_targets[-_MAX_DIRECT_REPLY_TARGETS:]
 
 
+async def _get_long_running_triggers(
+    session: Uninfo,
+    interface: QryItrface,
+    bot_id: str,
+) -> list[str]:
+    global _long_running_triggers_cache
+    if _long_running_triggers_cache is not None:
+        return _long_running_triggers_cache
+
+    triggers = list(_DEFAULT_LONG_RUNNING_TRIGGERS)
+    try:
+        ctx = OptionalToolContext(
+            session_id=session.scene.id,
+            request_id=None,
+            user_id=None,
+            user_name=None,
+            interface=interface,
+            bot_id=bot_id,
+            history=[],
+            direct_targets=[],
+            emoji_like_candidate_ids=set(),
+            has_direct_targets=False,
+            is_multi_direct_reply=False,
+            is_cross_user_direct_reply=False,
+            has_admin_permission=False,
+            config=plugin_config,
+            model=None,
+            stop_words=stop_words,
+        )
+        triggers.extend(await get_long_running_triggers(ctx))
+    except Exception as e:
+        logger.warning(f"读取长任务触发词失败，使用默认触发词: {e}")
+
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for trigger in triggers:
+        item = str(trigger or "").strip()
+        if not item:
+            continue
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(item)
+    _long_running_triggers_cache = normalized
+    return normalized
+
+
+async def _has_protected_long_intent(
+    text: str,
+    *,
+    is_direct: bool,
+    session: Uninfo,
+    interface: QryItrface,
+    bot_id: str,
+) -> bool:
+    if not is_direct:
+        return False
+    normalized_text = re.sub(r"\s+", "", (text or "")).lower()
+    if not normalized_text:
+        return False
+    triggers = await _get_long_running_triggers(session, interface, bot_id)
+    return any(trigger.lower().replace(" ", "") in normalized_text for trigger in triggers)
+
+
 def _start_group_reply_worker_locked(group_id: str, state: GroupReplyState) -> None:
     state.running = True
     state.task = asyncio.create_task(_run_group_reply_worker(group_id))
+
+
+def _clear_protected_long_intent_request(group_id: str, request_id: str) -> None:
+    if not is_request_protected_long_intent(group_id, request_id):
+        return
+    clear_request_protected_long_intent(group_id, request_id)
+    logger.info(f"clear protected-long-intent request session={group_id} request_id={request_id}")
 
 
 async def _run_group_reply_worker(group_id: str) -> None:
@@ -279,11 +386,18 @@ async def _run_group_reply_worker(group_id: str) -> None:
                         request = None
                 state.running_request_is_direct = bool(request and request.is_direct)
                 state.running_request_id = request.request_id if request else None
+                state.running_request_protected_long_intent = bool(request and request.protected_long_intent)
 
             if request is None:
                 break
 
             await set_latest_request_id(group_id, request.request_id)
+            if request.protected_long_intent:
+                mark_request_protected_long_intent(group_id, request.request_id)
+                logger.info(
+                    f"request marked protected-long-intent session={group_id} "
+                    f"request_id={request.request_id}"
+                )
             handled_request_ids.add(request.request_id)
             async with get_session() as reply_session:
                 await handle_reply_logic(
@@ -322,14 +436,29 @@ async def _run_group_reply_worker(group_id: str) -> None:
                                 bound_images=[],
                                 disable_inline_history_images=False,
                                 binding_notice=None,
+                                protected_long_intent=False,
                             )
                             _refresh_direct_request_locked(followup_request, state)
                             if followup_request.direct_targets:
                                 state.latest = followup_request
+            if request.protected_long_intent:
+                _clear_protected_long_intent_request(group_id, request.request_id)
             request = None
     except asyncio.CancelledError:
         request_detached = bool(request and is_request_detached(group_id, request.request_id))
-        if request and request.is_direct and (has_request_sent(group_id, request.request_id) or request_detached):
+        request_replaced_by_long_intent = False
+        if request and request.protected_long_intent:
+            async with _group_reply_state_lock:
+                state = _group_reply_states.get(group_id)
+                request_replaced_by_long_intent = bool(
+                    state
+                    and state.latest
+                    and state.latest.request_id != request.request_id
+                    and state.latest.protected_long_intent
+                )
+        if request and request.is_direct and (
+            has_request_sent(group_id, request.request_id) or request_detached or request_replaced_by_long_intent
+        ):
             async with _group_reply_state_lock:
                 state = _group_reply_states.get(group_id)
                 if state:
@@ -351,9 +480,11 @@ async def _run_group_reply_worker(group_id: str) -> None:
             state.task = None
             state.running_request_is_direct = False
             state.running_request_id = None
+            state.running_request_protected_long_intent = False
             if state.latest is not None:
                 _start_group_reply_worker_locked(group_id, state)
         for request_id in handled_request_ids:
+            _clear_protected_long_intent_request(group_id, request_id)
             if not is_request_detached(group_id, request_id):
                 clear_request_sent(group_id, request_id)
 
@@ -1608,6 +1739,13 @@ async def handle_message(
         direct_targets: list[dict[str, Any]] = []
         raw_direct_targets: list[DirectReplyTarget] = []
         is_direct = bool(to_me)
+        current_protected_long_intent = await _has_protected_long_intent(
+            body,
+            is_direct=is_direct,
+            session=session,
+            interface=interface,
+            bot_id=str(bot.self_id),
+        )
         if is_direct:
             current_target = DirectReplyTarget(
                 message_id=current_message_id,
@@ -1620,6 +1758,7 @@ async def handle_message(
                 bound_images=bound_images,
                 disable_inline_history_images=disable_inline_history_images,
                 binding_notice=binding_notice,
+                protected_long_intent=current_protected_long_intent,
             )
             async with _group_reply_state_lock:
                 reply_state = _group_reply_states.setdefault(group_id, GroupReplyState())
@@ -1653,15 +1792,31 @@ async def handle_message(
             bound_images=bound_images,
             disable_inline_history_images=disable_inline_history_images,
             binding_notice=binding_notice,
+            protected_long_intent=current_protected_long_intent,
             direct_targets=direct_targets,
             raw_direct_targets=raw_direct_targets,
         )
         running_request_id: str | None = None
+        running_request_protected_long_intent = False
         async with _group_reply_state_lock:
             reply_state = _group_reply_states.get(group_id)
             if reply_state and reply_state.running:
                 running_request_id = reply_state.running_request_id
+                running_request_protected_long_intent = reply_state.running_request_protected_long_intent
+                if running_request_id is None and reply_state.latest is not None:
+                    running_request_id = reply_state.latest.request_id
+                    running_request_protected_long_intent = reply_state.latest.protected_long_intent
         running_request_has_sent = has_request_sent(group_id, running_request_id) if running_request_id else False
+        running_request_detached = is_request_detached(group_id, running_request_id) if running_request_id else False
+        running_request_protected = (
+            running_request_protected_long_intent
+            or (
+                is_request_protected_long_intent(group_id, running_request_id)
+                if running_request_id
+                else False
+            )
+        )
+        running_request_claimed = running_request_detached or running_request_protected
         async with _group_reply_state_lock:
             reply_state = _group_reply_states.setdefault(group_id, GroupReplyState())
             if is_direct:
@@ -1669,13 +1824,36 @@ async def handle_message(
             if not is_direct and (reply_state.pending_direct_targets or reply_state.running_request_is_direct):
                 logger.debug(f"群 {group_id} 有直接触发待处理，跳过普通概率回复")
                 return
+            if (
+                reply_state.running
+                and running_request_claimed
+                and not (request.is_direct and current_protected_long_intent)
+            ):
+                if running_request_protected:
+                    logger.info(
+                        f"skip cancel protected-long-intent request session={group_id} "
+                        f"request_id={running_request_id}"
+                    )
+                return
             reply_state.latest = request
             if reply_state.running:
                 if reply_state.task and not reply_state.task.done():
-                    can_cancel_running = not running_request_has_sent
+                    can_cancel_running = (
+                        not running_request_has_sent
+                        and not running_request_detached
+                        and (
+                            not running_request_protected
+                            or (request.is_direct and current_protected_long_intent)
+                        )
+                    )
                     if can_cancel_running:
                         reply_state.task.cancel()
                         logger.info(f"群 {group_id} 收到更新请求，已取消旧回复并切换到最新")
+                    elif running_request_protected and not current_protected_long_intent:
+                        logger.info(
+                            f"skip cancel protected-long-intent request session={group_id} "
+                            f"request_id={running_request_id}"
+                        )
                 else:
                     logger.warning(
                         f"群 {group_id} 回复状态异常（running=True 但 worker 不可用），已重启并切换到最新请求"

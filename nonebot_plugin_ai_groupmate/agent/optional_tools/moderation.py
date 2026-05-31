@@ -9,7 +9,7 @@ from nonebot_plugin_orm import get_session
 from nonebot_plugin_uninfo import SceneType
 
 from ...model import ChatHistory
-from ...reply_guard import is_request_active
+from ...reply_guard import can_request_continue
 from .types import OptionalToolBundle, OptionalToolContext
 
 PERMISSION_STATUS = """
@@ -87,7 +87,7 @@ def create_mute_tool(ctx: OptionalToolContext):
         - duration_seconds: 禁言时长（秒），0 表示解除禁言，最大 2592000
         - reason: 操作原因
         """
-        if ctx.request_id is not None and not await is_request_active(ctx.session_id, ctx.request_id):
+        if ctx.request_id is not None and not await can_request_continue(ctx.session_id, ctx.request_id):
             return "请求已过期，已取消操作。"
         if ctx.interface is None:
             return "无法获取群成员接口，禁言失败。"

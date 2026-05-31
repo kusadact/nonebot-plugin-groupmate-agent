@@ -148,7 +148,7 @@ async def search_history_context(query: str, runtime: ToolRuntime[Context]) -> s
     搜索历史聊天记录。会返回某个时间段，半小时左右的聊天记录。当需要了解群内历史群内聊天记录或过往话题时使用
     输入：搜索关键信息或话题描述，这个语句直接从RAG数据库中进行混合搜索
     """
-    if runtime.context.request_id is not None and not await is_request_active(
+    if runtime.context.request_id is not None and not await can_request_continue(
         runtime.context.session_id, runtime.context.request_id
     ):
         return "请求已过期，已取消搜索。"

@@ -216,6 +216,24 @@ async def load_optional_tool_bundles(ctx: OptionalToolContext) -> list[OptionalT
     return bundles
 
 
+async def get_long_running_triggers(ctx: OptionalToolContext) -> list[str]:
+    triggers: list[str] = []
+    for module in [*BUILTIN_TOOL_MODULES, *_load_user_tool_modules()]:
+        module_triggers = getattr(module, "LONG_RUNNING_TRIGGERS", None)
+        if module_triggers is None:
+            module_triggers = getattr(module, "long_running_triggers", None)
+        if module_triggers is None:
+            continue
+        if isinstance(module_triggers, str):
+            triggers.append(module_triggers)
+            continue
+        try:
+            triggers.extend(str(trigger) for trigger in module_triggers if str(trigger).strip())
+        except TypeError:
+            logger.warning(f"忽略无效长任务触发词声明: {_module_display_name(module)}")
+    return triggers
+
+
 async def list_optional_tool_statuses(ctx: OptionalToolContext) -> list[OptionalToolStatus]:
     statuses: list[OptionalToolStatus] = []
 

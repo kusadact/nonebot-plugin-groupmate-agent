@@ -4,6 +4,7 @@ import asyncio
 _lock = asyncio.Lock()
 _latest_request_ids: dict[str, str] = {}
 _sent_request_ids: set[tuple[str, str]] = set()
+_protected_long_intent_request_ids: set[tuple[str, str]] = set()
 _detached_request_ids: set[tuple[str, str]] = set()
 _detached_task_counts: dict[tuple[str, str], int] = {}
 
@@ -25,7 +26,24 @@ async def is_request_active(session_id: str, request_id: str) -> bool:
 
 async def can_request_continue(session_id: str, request_id: str) -> bool:
     async with _lock:
-        return _latest_request_ids.get(session_id) == request_id or _is_detached(session_id, request_id)
+        key = (session_id, request_id)
+        return (
+            _latest_request_ids.get(session_id) == request_id
+            or key in _protected_long_intent_request_ids
+            or _is_detached(session_id, request_id)
+        )
+
+
+def mark_request_protected_long_intent(session_id: str, request_id: str) -> None:
+    _protected_long_intent_request_ids.add((session_id, request_id))
+
+
+def is_request_protected_long_intent(session_id: str, request_id: str) -> bool:
+    return (session_id, request_id) in _protected_long_intent_request_ids
+
+
+def clear_request_protected_long_intent(session_id: str, request_id: str) -> None:
+    _protected_long_intent_request_ids.discard((session_id, request_id))
 
 
 def mark_request_detached(session_id: str, request_id: str) -> None:

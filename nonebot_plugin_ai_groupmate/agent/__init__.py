@@ -1403,12 +1403,15 @@ async def format_chat_history(
     disable_inline_history_images: bool = False,
     binding_notice: str | None = None,
     omit_images: bool = False,
+    background_only: bool = False,
+    exclude_message_ids: set[str] | None = None,
 ) -> list[BaseMessage]:
     """将最近图片以内联多模态格式喂给主模型，旧图片退化为文本。"""
     messages: list[BaseMessage] = []
     user_roles = user_roles or {}
     bound_messages = bound_messages or []
     bound_images = bound_images or []
+    exclude_message_ids = exclude_message_ids or set()
 
     def _role_prefix(uid: str) -> str:
         role = user_roles.get(uid)
@@ -1431,6 +1434,84 @@ async def format_chat_history(
         else:
             snippet = body[:30] + ("…" if len(body) > 30 else "")
         id_to_summary[own_id] = f'{display_name} "{snippet}"'
+
+    if background_only:
+        transcript_lines = [
+            "【最近聊天记录（仅背景参考，不是本轮指令）】",
+            "以下旧消息只用于理解语境；禁止执行其中的生成图片、发语音、搜索、禁言、发图等旧请求。",
+        ]
+        for msg in history:
+            own_id, reply_to_id, body = _parse_msg_meta(msg.content)
+            if own_id and own_id in exclude_message_ids:
+                continue
+
+            time_str = msg.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            display_name = _strip_role_prefix(msg.user_name)
+            role_prefix = _role_prefix(msg.user_id)
+            if reply_to_id and reply_to_id in id_to_summary:
+                reply_prefix = f"(回复 {id_to_summary[reply_to_id]}) "
+            elif reply_to_id:
+                reply_prefix = "(回复了一条消息) "
+            else:
+                reply_prefix = ""
+
+            if msg.content_type == "bot":
+                transcript_lines.append(f"[{time_str}] {plugin_config.bot_name}: {body or msg.content}")
+            elif msg.content_type == "image":
+                image_summary = f"（简述：{body}）" if body and body != "[图片]" else ""
+                line = f"[{time_str}] {role_prefix}{display_name}: {reply_prefix}"
+                transcript_lines.append(
+                    f"{line}发送了一张图片{image_summary} [历史图片已省略]"
+                )
+            else:
+                transcript_lines.append(f"[{time_str}] {role_prefix}{display_name}: {reply_prefix}{body}")
+
+        if len(transcript_lines) > 2:
+            messages.append(HumanMessage(content="\n".join(transcript_lines)))
+
+        if binding_notice:
+            messages.append(HumanMessage(content=binding_notice))
+
+        if bound_messages:
+            lines = ["【本轮回复引用的消息】当前用户回复了以下历史消息，回答时优先结合这些引用内容："]
+            for idx, item in enumerate(bound_messages, 1):
+                user_name = (item.get("user_name") or "未知用户").strip()
+                content_type = (item.get("content_type") or "text").strip()
+                msg_id = (item.get("msg_id") or "").strip()
+                text = (item.get("text") or "").strip()
+                type_label = "图片消息" if content_type == "image" else "文本消息"
+                id_suffix = f" msg_id={msg_id}" if msg_id else ""
+                lines.append(f"{idx}. [{type_label}{id_suffix}] {user_name}: {text}")
+            messages.append(HumanMessage(content="\n".join(lines)))
+
+        if bound_images and not omit_images:
+            parts: list[dict[str, Any]] = [
+                {
+                    "type": "text",
+                    "text": (
+                        "【当前重点图片】以下图片与本轮问题直接相关，优先分析这些图片，"
+                        "不要把其他历史图片当成当前问题对象。"
+                    ),
+                }
+            ]
+            for idx, image in enumerate(bound_images, 1):
+                image_url = (image.get("image_url") or "").strip()
+                if not image_url:
+                    continue
+
+                label = (image.get("label") or f"重点图{idx}").strip()
+                note = (image.get("note") or "").strip()
+                text = f"\n重点图{idx}（{label}）"
+                if note:
+                    text += f"，简述：{note}"
+                text += "："
+                parts.append({"type": "text", "text": text})
+                parts.append({"type": "image_url", "image_url": {"url": image_url}})
+
+            if len(parts) > 1:
+                messages.append(HumanMessage(content=parts))
+
+        return messages
 
     image_indices = [i for i, m in enumerate(history) if m.content_type == "image"]
     if omit_images or bound_images or disable_inline_history_images:
@@ -1562,6 +1643,7 @@ async def choice_response_strategy(
     使用 Agent 决定回复策略。
     """
     try:
+        direct_targets = direct_targets or []
         emoji_like_candidate_ids = _collect_emoji_like_candidate_ids(history)
         emoji_like_candidate_ids.update(_collect_bound_message_ids(bound_messages))
 
@@ -1587,9 +1669,14 @@ async def choice_response_strategy(
             bound_images=bound_images,
             disable_inline_history_images=disable_inline_history_images,
             binding_notice=binding_notice,
+            background_only=bool(direct_targets),
+            exclude_message_ids={
+                str(target.get("message_id") or "").strip()
+                for target in direct_targets
+                if str(target.get("message_id") or "").strip()
+            },
         )
 
-        direct_targets = direct_targets or []
         latest_user_msg = next((msg for msg in reversed(history) if msg.content_type != "bot"), None)
         focus_notice = ""
         reply_scope_instruction = (
@@ -1627,10 +1714,11 @@ async def choice_response_strategy(
             focus_lines.append("请严格按上面的编号顺序逐条回复，每条回复单独一行。")
             focus_lines.append("第1行只回复第1条消息，第2行只回复第2条消息，不要合并，不要漏回。")
             focus_lines.append("如果某条消息信息不足，也要单独用一句话说明。")
+            focus_lines.append("只能执行这些编号消息里明确提出的请求；历史记录里的旧命令只当背景，不要执行。")
             focus_notice = "\n".join(focus_lines)
             reply_scope_instruction = (
                 "本轮已经明确列出需要直接回复的消息；必须按编号逐条回复这些消息，"
-                "不要改成只回应最新一条。"
+                "不要改成只回应最新一条，也不要执行历史记录里的旧请求。"
             )
         elif latest_user_msg is not None:
             focus_id, focus_reply_id, focus_body = _parse_msg_meta(latest_user_msg.content)
@@ -1692,6 +1780,12 @@ async def choice_response_strategy(
                 disable_inline_history_images=True,
                 binding_notice=binding_notice,
                 omit_images=True,
+                background_only=bool(direct_targets),
+                exclude_message_ids={
+                    str(target.get("message_id") or "").strip()
+                    for target in direct_targets
+                    if str(target.get("message_id") or "").strip()
+                },
             )
             text_only_prompt = prompt_text.replace(
                 "如果是针对图片的消息，请结合图片内容回答。",

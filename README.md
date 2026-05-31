@@ -132,12 +132,9 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
     )
 ```
 
-长耗时工具可以在确认任务已经开始后使用 detached 生命周期，避免同一群的新请求取消后台任务：
+长耗时工具可以在确认任务已经开始后使用 detached 生命周期，让后台任务脱离当前 Agent 等待，当前请求结束后仍可发送结果：
 
 ```python
-LONG_RUNNING_TRIGGERS = ["生成图片", "画图", "做图"]
-
-
 async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
     async def run_long_job(prompt: str) -> None:
         # 执行耗时任务，例如生成图片。
@@ -159,9 +156,8 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
     return OptionalToolBundle(name="image_tool", tools=[generate_image_tool])
 ```
 
-`LONG_RUNNING_TRIGGERS` 是可选的模块级声明。用户直接 @bot 发起并命中这些关键词时，主 Agent 会在决策和 RAG 阶段保护该请求，不会被普通同群新消息取消；新的直达长任务请求仍可替换旧请求。
 `ctx.create_detached_task(...)` 会负责注册 detached 状态、记录异常并在后台任务结束后清理状态。
-不要只调用 `ctx.detach_request(...)` 后继续在当前工具协程里 `await` 长任务；当前 Agent worker 仍可能被取消。
+不要只调用 `ctx.detach_request(...)` 后继续在当前工具协程里 `await` 长任务；这会继续占用当前 Agent worker，并且仍会受 Agent 超时影响。
 </details>
 
 ## ✨ 当前分支能力
@@ -171,9 +167,9 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
   - 默认使用阿里云 DashScope / 通义千问；主对话、总结、多模态和图片 embedding 已内置默认模型和地址，填写 `qwen_key` 即可使用
   - 联网搜索、消息评论表情、禁言和计算器已拆为内置 Agent 可选工具模块；用户自定义工具从 `data/nonebot_plugin_ai_groupmate/tools` 加载；联网搜索不健康时不会注入工具和 prompt
   - 支持联网搜索、历史聊天检索、表情包搜索/发送、消息评论表情、关系更新和禁言管理；放入对应用户工具后可扩展更多能力
-  - 每个群只保留最新待处理回复请求，旧请求会被取消
-  - 直接 @/回复 场景会按编号聚合处理，逐条回复，不会互相抢上下文
-  - 工具调用带 `request_id` 过期保护，旧请求不会继续搜索、发消息或更新关系
+  - 每个群按队列顺序处理回复请求；直接 @/回复 请求不会因同群新消息过期，普通概率回复只保留少量待处理项
+  - 直接 @/回复 场景会逐条回复，不会互相抢上下文
+  - 工具调用带 `request_id` 活跃状态保护；请求结束或 detached 清理后不会继续搜索、发消息或更新关系
   - 当前触发消息会作为本轮重点注入 prompt，降低顺着其他人支线接话的概率
   - 多段回复使用一次 `reply_user` 调用，按换行由程序串行拆成多条消息
   - `reply_user` 会把实际发送段落返回给 Agent，方便本轮后续工具知道刚刚说过什么

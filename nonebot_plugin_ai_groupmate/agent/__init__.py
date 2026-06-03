@@ -8,10 +8,9 @@ import re
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import jieba
-from langchain.agents import create_agent
 from langchain.tools import ToolRuntime, tool
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -23,11 +22,6 @@ from nonebot_plugin_uninfo import QryItrface, SceneType
 from pydantic import BaseModel, Field, SecretStr, field_validator
 from sqlalchemy import Select, desc
 from sqlalchemy.orm.session import Session
-
-try:
-    from langchain.agents.middleware import ToolCallLimitMiddleware
-except Exception:
-    ToolCallLimitMiddleware = None
 
 from ..config import Config
 from ..favorability import apply_favorability_change_detailed
@@ -44,6 +38,7 @@ from ..reply_guard import (
     register_detached_task,
     unregister_detached_task,
 )
+from .graph import GraphToolLimit, build_chat_graph, make_agent_state
 from .optional_tools import OptionalToolContext, load_optional_tool_bundles
 from .optional_tools.emoji_like import extract_emoji_like_message_id_text
 from .optional_tools.moderation import PERMISSION_STATUS
@@ -1361,36 +1356,16 @@ async def create_chat_agent(
             finish,
         ]
 
-    middleware = None
-    if ToolCallLimitMiddleware is not None:
-        try:
-            middleware = [
-                ToolCallLimitMiddleware(run_limit=20),
-                ToolCallLimitMiddleware(tool_name="reply_user", run_limit=1),
-                ToolCallLimitMiddleware(tool_name="send_meme_image", run_limit=1),
-            ]
-            for bundle in optional_bundles:
-                for spec in bundle.tool_limits:
-                    middleware.append(ToolCallLimitMiddleware(tool_name=spec.tool_name, run_limit=spec.run_limit))
-        except Exception as e:
-            logger.warning(f"当前 LangChain middleware 参数不兼容，跳过工具限流: {e}")
-            middleware = None
+    tool_limits = [
+        GraphToolLimit(tool_name=None, run_limit=20),
+        GraphToolLimit(tool_name="reply_user", run_limit=1),
+        GraphToolLimit(tool_name="send_meme_image", run_limit=1),
+    ]
+    for bundle in optional_bundles:
+        for spec in bundle.tool_limits:
+            tool_limits.append(GraphToolLimit(tool_name=spec.tool_name, run_limit=spec.run_limit))
 
-    try:
-        if middleware:
-            return create_agent(
-                model,
-                tools=tools,
-                system_prompt=system_prompt,
-                context_schema=Context,
-                middleware=middleware,
-            )
-    except TypeError:
-        logger.warning("当前 LangChain 版本不支持 agent middleware，跳过工具限流")
-    except Exception as e:
-        logger.warning(f"Agent middleware 初始化失败，跳过工具限流: {e}")
-
-    return create_agent(model, tools=tools, system_prompt=system_prompt, context_schema=Context)
+    return build_chat_graph(model, tools, system_prompt, tool_limits=tool_limits)
 
 
 async def format_chat_history(
@@ -1647,7 +1622,7 @@ async def choice_response_strategy(
         emoji_like_candidate_ids = _collect_emoji_like_candidate_ids(history)
         emoji_like_candidate_ids.update(_collect_bound_message_ids(bound_messages))
 
-        agent = await create_chat_agent(
+        graph = await create_chat_agent(
             db_session,
             session_id,
             request_id,
@@ -1759,12 +1734,9 @@ async def choice_response_strategy(
 """
 
         final_messages = chat_history_messages + [HumanMessage(content=prompt_text)]
-        invoke_input: dict[str, Any] = {"messages": final_messages}
+        invoke_state = make_agent_state(final_messages, session_id, request_id)
         try:
-            await agent.ainvoke(
-                cast(Any, invoke_input),
-                context=Context(session_id=session_id, request_id=request_id),
-            )
+            await graph.ainvoke(invoke_state)
         except Exception as e:
             if not _is_image_inspection_bad_request(e):
                 raise
@@ -1797,10 +1769,7 @@ async def choice_response_strategy(
             text_only_input: dict[str, Any] = {
                 "messages": text_only_messages + [HumanMessage(content=text_only_prompt)]
             }
-            await agent.ainvoke(
-                cast(Any, text_only_input),
-                context=Context(session_id=session_id, request_id=request_id),
-            )
+            await graph.ainvoke(make_agent_state(text_only_input["messages"], session_id, request_id))
         await db_session.commit()
         return ResponseMessage(need_reply=False, text=None)
 

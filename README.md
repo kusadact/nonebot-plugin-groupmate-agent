@@ -113,6 +113,7 @@ plugins = ["nonebot_plugin_ai_groupmate"]
 <summary>自定义 Agent 工具</summary>
 
 用户自定义工具应放在 bot 数据目录下的 `data/nonebot_plugin_ai_groupmate/tools`。
+可参考工具仓库 [`kusadact/ai-groupmate-tools`](https://github.com/kusadact/ai-groupmate-tools)，其中存放了适用于本插件的用户自定义 Agent 工具实例。
 
 支持两种文件形式：
 

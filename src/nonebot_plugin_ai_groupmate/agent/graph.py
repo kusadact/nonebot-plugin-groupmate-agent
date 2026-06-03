@@ -1,6 +1,6 @@
 """LangGraph-based agent executor for the groupmate chat tools."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, TypedDict
 
@@ -107,6 +107,109 @@ def _normalize_system_messages(system_messages: Sequence[BaseMessage]) -> list[B
     return [message for message in system_messages if _message_has_content(message)]
 
 
+def _as_mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _nested_value(value: Any, *keys: str) -> Any:
+    current = value
+    for key in keys:
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _to_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            return int(stripped)
+    return None
+
+
+def _first_int(*values: Any) -> int | None:
+    for value in values:
+        parsed = _to_int(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _format_token_count(value: int | None) -> str:
+    return "-" if value is None else str(value)
+
+
+def _log_llm_token_usage(response: AIMessage, state: AgentState) -> None:
+    usage_metadata = _as_mapping(getattr(response, "usage_metadata", None))
+    response_metadata = _as_mapping(getattr(response, "response_metadata", None))
+    token_usage = _as_mapping(response_metadata.get("token_usage"))
+    raw_usage = _as_mapping(response_metadata.get("usage"))
+    input_token_details = _as_mapping(usage_metadata.get("input_token_details"))
+    prompt_token_details = _as_mapping(token_usage.get("prompt_tokens_details"))
+
+    input_tokens = _first_int(
+        usage_metadata.get("input_tokens"),
+        token_usage.get("prompt_tokens"),
+        raw_usage.get("input_tokens"),
+        response_metadata.get("input_tokens"),
+    )
+    output_tokens = _first_int(
+        usage_metadata.get("output_tokens"),
+        token_usage.get("completion_tokens"),
+        raw_usage.get("output_tokens"),
+        response_metadata.get("output_tokens"),
+    )
+    total_tokens = _first_int(
+        usage_metadata.get("total_tokens"),
+        token_usage.get("total_tokens"),
+        raw_usage.get("total_tokens"),
+        response_metadata.get("total_tokens"),
+    )
+    cached_tokens = _first_int(
+        input_token_details.get("cache_read"),
+        input_token_details.get("cached_tokens"),
+        prompt_token_details.get("cached_tokens"),
+        prompt_token_details.get("cache_read"),
+        token_usage.get("cache_read_input_tokens"),
+        raw_usage.get("cache_read_input_tokens"),
+        _nested_value(token_usage, "input_token_details", "cache_read"),
+        _nested_value(token_usage, "input_token_details", "cached_tokens"),
+    )
+    cache_write_tokens = _first_int(
+        input_token_details.get("cache_creation"),
+        input_token_details.get("cache_creation_input_tokens"),
+        prompt_token_details.get("cache_creation_tokens"),
+        token_usage.get("cache_creation_input_tokens"),
+        raw_usage.get("cache_creation_input_tokens"),
+        _nested_value(token_usage, "input_token_details", "cache_creation"),
+    )
+
+    if all(value is None for value in (input_tokens, output_tokens, total_tokens, cached_tokens, cache_write_tokens)):
+        return
+
+    cache_hit = "-"
+    if input_tokens and cached_tokens is not None:
+        cache_hit = f"{cached_tokens / input_tokens:.1%}"
+
+    logger.info(
+        "[Agent] LLM token usage "
+        f"session={state['session_id']} request_id={state['request_id'] or '-'} "
+        f"input={_format_token_count(input_tokens)} "
+        f"output={_format_token_count(output_tokens)} "
+        f"total={_format_token_count(total_tokens)} "
+        f"cached={_format_token_count(cached_tokens)} "
+        f"cache_write={_format_token_count(cache_write_tokens)} "
+        f"cache_hit={cache_hit}"
+    )
+
+
 def _make_agent_node(model: Any, tools: list[BaseTool], system_messages: Sequence[BaseMessage]) -> Any:
     bound_model = model.bind_tools(tools)
     normalized_system_messages = _normalize_system_messages(system_messages)
@@ -115,6 +218,7 @@ def _make_agent_node(model: Any, tools: list[BaseTool], system_messages: Sequenc
         response: AIMessage = await bound_model.ainvoke([*normalized_system_messages, *state["messages"]])
         if not isinstance(response, AIMessage):
             response = AIMessage(content=str(getattr(response, "content", response)))
+        _log_llm_token_usage(response, state)
         return {"messages": [response], "called_finish": 0}
 
     return agent_node

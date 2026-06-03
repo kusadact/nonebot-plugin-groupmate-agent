@@ -153,6 +153,7 @@ def _log_llm_token_usage(response: AIMessage, state: AgentState) -> None:
     raw_usage = _as_mapping(response_metadata.get("usage"))
     input_token_details = _as_mapping(usage_metadata.get("input_token_details"))
     prompt_token_details = _as_mapping(token_usage.get("prompt_tokens_details"))
+    raw_prompt_token_details = _as_mapping(raw_usage.get("prompt_tokens_details"))
 
     input_tokens = _first_int(
         usage_metadata.get("input_tokens"),
@@ -177,18 +178,26 @@ def _log_llm_token_usage(response: AIMessage, state: AgentState) -> None:
         input_token_details.get("cached_tokens"),
         prompt_token_details.get("cached_tokens"),
         prompt_token_details.get("cache_read"),
+        raw_prompt_token_details.get("cached_tokens"),
+        raw_prompt_token_details.get("cache_read"),
         token_usage.get("cache_read_input_tokens"),
         raw_usage.get("cache_read_input_tokens"),
         _nested_value(token_usage, "input_token_details", "cache_read"),
         _nested_value(token_usage, "input_token_details", "cached_tokens"),
+        _nested_value(raw_usage, "input_token_details", "cache_read"),
+        _nested_value(raw_usage, "input_token_details", "cached_tokens"),
     )
     cache_write_tokens = _first_int(
         input_token_details.get("cache_creation"),
         input_token_details.get("cache_creation_input_tokens"),
         prompt_token_details.get("cache_creation_tokens"),
+        prompt_token_details.get("cache_creation_input_tokens"),
+        raw_prompt_token_details.get("cache_creation_tokens"),
+        raw_prompt_token_details.get("cache_creation_input_tokens"),
         token_usage.get("cache_creation_input_tokens"),
         raw_usage.get("cache_creation_input_tokens"),
         _nested_value(token_usage, "input_token_details", "cache_creation"),
+        _nested_value(raw_usage, "input_token_details", "cache_creation"),
     )
 
     if all(value is None for value in (input_tokens, output_tokens, total_tokens, cached_tokens, cache_write_tokens)):

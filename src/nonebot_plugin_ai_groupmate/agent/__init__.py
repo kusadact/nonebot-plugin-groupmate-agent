@@ -1252,15 +1252,11 @@ async def create_chat_agent(
     optional_tools = [tool_item for bundle in optional_bundles for tool_item in bundle.tools]
     optional_tool_instructions = "\n".join(bundle.prompt for bundle in optional_bundles if bundle.prompt)
 
-    system_prompt = f"""你是QQ群群友「{plugin_config.bot_name}」。
+    stable_system_prompt = f"""你是QQ群群友「{plugin_config.bot_name}」。
 你不是助手，不承认自己是AI。
 
 【任务】
 结合聊天记录、群体记忆和人际关系，判断是否需要回复；需要时用自然群聊语气回应。
-{group_context}
-{relation_context}
-{recent_relations_context}
-{permission_status}
 
 【风格】
 - 像真实群友，口语化、简短自然
@@ -1280,9 +1276,6 @@ async def create_chat_agent(
 - 文本：`reply_user`
 - 表情包：先 `search_meme_image` 或 `search_similar_meme_by_id`，再 `send_meme_image`
 - 群内上下文：`search_history_context`
-{user_bound_tool_instruction}
-{cross_user_direct_instruction}
-{optional_tool_instructions}
 - 回复结束后调用 `finish`
 
 【边界】
@@ -1294,6 +1287,17 @@ async def create_chat_agent(
 【RAG 检索硬约束】
 - 在 `search_history_context` 中禁止相对时间词：昨天、前天、本周、上周、这个月、上个月、最近等
 - 使用明确日期时间或关键词检索
+"""
+    tool_mode_prompt = f"""【本轮工具与模式】
+{permission_status}
+{user_bound_tool_instruction}
+{cross_user_direct_instruction}
+{optional_tool_instructions}
+"""
+    context_prompt = f"""【本轮上下文档案】
+{group_context}
+{relation_context}
+{recent_relations_context}
 """
     search_meme_tool = create_search_meme_tool(session_id, request_id)
     send_meme_tool = create_send_meme_tool(session_id, request_id, bot_id)
@@ -1365,7 +1369,15 @@ async def create_chat_agent(
         for spec in bundle.tool_limits:
             tool_limits.append(GraphToolLimit(tool_name=spec.tool_name, run_limit=spec.run_limit))
 
-    return build_chat_graph(model, tools, system_prompt, tool_limits=tool_limits)
+    system_messages = [
+        SystemMessage(content=stable_system_prompt),
+        SystemMessage(content=tool_mode_prompt),
+    ]
+    graph = build_chat_graph(model, tools, system_messages, tool_limits=tool_limits)
+    context_messages: list[BaseMessage] = []
+    if context_prompt.strip():
+        context_messages.append(HumanMessage(content=context_prompt))
+    return graph, context_messages
 
 
 async def format_chat_history(
@@ -1622,7 +1634,7 @@ async def choice_response_strategy(
         emoji_like_candidate_ids = _collect_emoji_like_candidate_ids(history)
         emoji_like_candidate_ids.update(_collect_bound_message_ids(bound_messages))
 
-        graph = await create_chat_agent(
+        graph, context_messages = await create_chat_agent(
             db_session,
             session_id,
             request_id,
@@ -1733,7 +1745,7 @@ async def choice_response_strategy(
 如果不需要回复，请保持沉默。
 """
 
-        final_messages = chat_history_messages + [HumanMessage(content=prompt_text)]
+        final_messages = context_messages + chat_history_messages + [HumanMessage(content=prompt_text)]
         invoke_state = make_agent_state(final_messages, session_id, request_id)
         try:
             await graph.ainvoke(invoke_state)
@@ -1767,7 +1779,7 @@ async def choice_response_strategy(
                 "如果原消息包含图片但当前没有图片内容，请不要臆测图片细节。",
             )
             text_only_input: dict[str, Any] = {
-                "messages": text_only_messages + [HumanMessage(content=text_only_prompt)]
+                "messages": context_messages + text_only_messages + [HumanMessage(content=text_only_prompt)]
             }
             await graph.ainvoke(make_agent_state(text_only_input["messages"], session_id, request_id))
         await db_session.commit()

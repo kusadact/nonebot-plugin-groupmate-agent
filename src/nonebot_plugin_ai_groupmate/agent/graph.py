@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Annotated, Any, TypedDict
 
 from langchain.tools import ToolRuntime
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
@@ -96,24 +96,28 @@ def _tool_accepts_runtime(tool_item: BaseTool) -> bool:
     return isinstance(fields, dict) and "runtime" in fields
 
 
-def _make_agent_node(model: Any, tools: list[BaseTool], system_prompt: str) -> Any:
+def _message_has_content(message: BaseMessage) -> bool:
+    content = message.content
+    if isinstance(content, str):
+        return bool(content.strip())
+    return bool(content)
+
+
+def _normalize_system_messages(system_messages: Sequence[BaseMessage]) -> list[BaseMessage]:
+    return [message for message in system_messages if _message_has_content(message)]
+
+
+def _make_agent_node(model: Any, tools: list[BaseTool], system_messages: Sequence[BaseMessage]) -> Any:
     bound_model = model.bind_tools(tools)
+    normalized_system_messages = _normalize_system_messages(system_messages)
 
     async def agent_node(state: AgentState) -> dict[str, Any]:
-        response: AIMessage = await bound_model.ainvoke([*state["messages"]])
+        response: AIMessage = await bound_model.ainvoke([*normalized_system_messages, *state["messages"]])
         if not isinstance(response, AIMessage):
             response = AIMessage(content=str(getattr(response, "content", response)))
         return {"messages": [response], "called_finish": 0}
 
-    async def prompted_agent_node(state: AgentState) -> dict[str, Any]:
-        response: AIMessage = await bound_model.ainvoke(
-            [SystemMessage(content=system_prompt), *state["messages"]],
-        )
-        if not isinstance(response, AIMessage):
-            response = AIMessage(content=str(getattr(response, "content", response)))
-        return {"messages": [response], "called_finish": 0}
-
-    return prompted_agent_node if system_prompt.strip() else agent_node
+    return agent_node
 
 
 def _make_tool_node(
@@ -222,7 +226,7 @@ def _make_should_continue(global_tool_limit: int) -> Any:
 def build_chat_graph(
     model: Any,
     tools: list[BaseTool],
-    system_prompt: str,
+    system_messages: Sequence[BaseMessage],
     *,
     tool_limits: Sequence[GraphToolLimit] | None = None,
 ) -> Any:
@@ -234,7 +238,7 @@ def build_chat_graph(
         tools_by_name[tool.name] = tool
 
     builder = StateGraph(AgentState)
-    builder.add_node("agent", _make_agent_node(model, tools, system_prompt))
+    builder.add_node("agent", _make_agent_node(model, tools, system_messages))
     builder.add_node(
         "tools",
         _make_tool_node(

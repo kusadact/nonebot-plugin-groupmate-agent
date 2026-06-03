@@ -143,7 +143,7 @@ def _make_tool_node(
             if name == "finish":
                 called_finish = 1
                 results.append(ToolMessage(content="", tool_call_id=tool_call_id))
-                break
+                continue
 
             if tool_count >= global_tool_limit:
                 results.append(ToolMessage(content="本轮工具调用次数已达上限，停止执行。", tool_call_id=tool_call_id))

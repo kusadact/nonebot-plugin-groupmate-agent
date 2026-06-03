@@ -8,7 +8,10 @@
 </div>
 
 ## 📖 介绍
-这是一个基于 NoneBot2 的 AI 群友插件，使用 LangChain Agent 驱动群聊交互。
+这是一个基于 NoneBot2 的 AI 群友插件，使用 LangGraph 状态图执行群聊 Agent，并保留 LangChain Tool Calling / 工具生态。
+
+从 `3.0.0` 起，主 Agent 执行器已从 LangChain `create_agent` 迁移到 LangGraph `StateGraph`：
+模型仍使用 `ChatOpenAI` 及兼容的 Tool Calling，现有 `@tool` 工具、内置可选工具和用户自定义工具接口保持兼容。
 
 从 `2.3.0` 起，插件默认使用阿里云 DashScope / 通义千问 API：
 主对话默认 `qwen3.5-plus`，群体记忆总结默认 `qwen-flash`，图片理解默认 `qwen-vl-max`，图片向量默认 `qwen3-vl-embedding`。
@@ -20,6 +23,14 @@
 - 聊天能力：群聊自动回复、主动发言、禁言辅助
 - 学习表情包能力：表情包识别、检索、发送、相似图搜索、自动拉黑
 - 扩展能力：用户可自行编写tools给agent使用
+
+`3.0.0` 主要变化：
+
+- 主 Agent 从 LangChain `create_agent` 迁移为 LangGraph `StateGraph`，执行链路更明确，方便继续扩展分支、状态和工具策略
+- 工具执行不再依赖旧的 LangChain `ToolNode` 默认行为，改为项目内 `graph.py` 显式处理工具调用、`ToolRuntime` 注入、请求过期保护和工具次数限制
+- 工具调用上限迁入图执行器：全局每轮最多 20 次，`reply_user` 每轮 1 次，`send_meme_image` 每轮 1 次；可选工具声明的额外限制仍会合并生效
+- `finish` 只标记本轮结束，不会提前跳过同一个 assistant message 中后续排队的 `reply_user`、`send_meme_image` 等工具调用，避免平行 tool calls 下漏发回复
+- 直接请求、detached 长任务、多模态历史、RAG、表情包检索、关系维护、禁言和用户自定义工具能力保持在新图执行器上运行
 
 `2.3.0` 主要变化：
 
@@ -163,7 +174,7 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
 ## ✨ 当前分支能力
 
 - **群聊 Agent**
-  - 基于 LangChain Agent + Tool Calling 驱动群聊回复，主对话模型使用 OpenAI 兼容接口
+  - 基于 LangGraph 状态图 + LangChain Tool Calling 驱动群聊回复，主对话模型使用 OpenAI 兼容接口
   - 默认使用阿里云 DashScope / 通义千问；主对话、总结、多模态和图片 embedding 已内置默认模型和地址，填写 `qwen_key` 即可使用
   - 联网搜索、消息评论表情、禁言和计算器已拆为内置 Agent 可选工具模块；用户自定义工具从 `data/nonebot_plugin_ai_groupmate/tools` 加载；联网搜索不健康时不会注入工具和 prompt
   - 支持联网搜索、历史聊天检索、表情包搜索/发送、消息评论表情、关系更新和禁言管理；放入对应用户工具后可扩展更多能力

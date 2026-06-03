@@ -13,3 +13,9 @@ scripts/rebuild_vectors.config
 server/
 scripts/
 updates/
+dev/
+.local-test/
+
+# local minimal stack secrets
+dev/minimal-stack/.env
+dev/minimal-stack/.env.backup.*

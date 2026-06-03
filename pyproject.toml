@@ -50,7 +50,7 @@ default-groups = ["dev"]
 
 [tool.uv.build-backend]
 module-name = "nonebot_plugin_ai_groupmate"
-module-root = ""
+module-root = "src"
 source-include = ["scripts/**", "mem0_api/**"]
 
 [tool.ruff]

@@ -9,10 +9,13 @@ import httpx
 from langchain.tools import tool
 from nonebot import require
 from nonebot.log import logger
+from nonebot_plugin_alconna import UniMessage
+from nonebot_plugin_orm import get_session
 from nonebot_plugin_uninfo import SceneType
 from pydantic import BaseModel, Field
 
-from ...reply_guard import can_request_continue
+from ...model import ChatHistory
+from ...reply_guard import can_request_continue, mark_request_sent as mark_guard_request_sent
 from .types import OptionalToolBundle, OptionalToolContext, ToolLimitSpec
 
 require("nonebot_plugin_localstore")
@@ -221,6 +224,37 @@ def _get_avatar_cache_dir(ctx: OptionalToolContext) -> Path:
     return cache_dir
 
 
+def _mark_request_sent(ctx: OptionalToolContext) -> None:
+    mark_sent = getattr(ctx, "mark_sent", None)
+    if mark_sent is not None:
+        mark_sent()
+        return
+    if ctx.request_id is not None:
+        mark_guard_request_sent(ctx.session_id, ctx.request_id)
+
+
+async def _record_sent_avatar(
+    ctx: OptionalToolContext,
+    message_id: str,
+    display_name: str,
+    user_id: str,
+) -> None:
+    try:
+        bot_name = str(getattr(ctx.config, "bot_name", None) or "bot")
+        async with get_session() as db_session:
+            chat_history = ChatHistory(
+                session_id=ctx.session_id,
+                user_id=str(ctx.bot_id or bot_name),
+                content_type="bot",
+                content=f"id: {message_id}\n发送了 QQ 头像，用户: {display_name}，QQ: {user_id}",
+                user_name=bot_name,
+            )
+            db_session.add(chat_history)
+            await db_session.commit()
+    except Exception as e:
+        logger.warning(f"记录 QQ 头像发送到聊天历史失败: {type(e).__name__}: {e}")
+
+
 def _cleanup_avatar_cache(cache_seconds: int) -> None:
     root = _avatar_cache_root()
     if not root.exists():
@@ -304,7 +338,8 @@ def create_qq_avatar_tool(ctx: OptionalToolContext):
         """
         匹配当前群成员或 QQ 号，下载 QQ 头像并返回本地图片文件路径。
 
-        当用户要求“用某人头像 / 给某人头像 / 拿某人头像做图”时调用。
+        当用户要求“用某人头像做图 / 拿某人头像作为参考图 / 给某人头像二创”时调用。
+        如果用户只是要求查看、发送某人的原始 QQ 头像，应该调用 send_qq_avatar_image。
         返回的 path 可作为其它图片编辑/生图工具的本地参考图路径。
 
         Args:
@@ -344,6 +379,54 @@ def create_qq_avatar_tool(ctx: OptionalToolContext):
     return fetch_qq_avatar_references
 
 
+def create_send_qq_avatar_tool(ctx: OptionalToolContext):
+    @tool("send_qq_avatar_image", args_schema=FetchQQAvatarArgs)
+    async def send_qq_avatar_image(target_user_names: list[str] | str) -> str:
+        """
+        匹配当前群成员或 QQ 号，下载并直接发送原始 QQ 头像到当前群聊。
+
+        当用户要求“发一下某人的头像 / 看看某人的 QQ 头像 / 把某人头像发群里”时调用。
+        不会生成、编辑或改造图片。
+
+        Args:
+            target_user_names: 当前群成员昵称、群名片或 QQ 号；“我/自己”表示当前发起用户。
+        """
+        if ctx.request_id is not None and not await can_request_continue(ctx.session_id, ctx.request_id):
+            return "请求已过期，已取消发送头像。"
+
+        try:
+            targets = await _resolve_avatar_targets(ctx, target_user_names)
+            if not targets:
+                return "未指定要发送头像的用户。"
+
+            _cleanup_avatar_cache(QQ_AVATAR_CACHE_SECONDS)
+
+            sent_items: list[str] = []
+            for user_id, display_name in targets:
+                content, _, _ = await _download_avatar(user_id, display_name, ctx)
+                if ctx.request_id is not None and not await can_request_continue(ctx.session_id, ctx.request_id):
+                    return "请求已过期，已取消发送头像。"
+
+                send_result = await UniMessage.image(raw=content).send()
+                _mark_request_sent(ctx)
+                message_id = send_result.msg_ids[-1]["message_id"] if send_result.msg_ids else "unknown"
+                await _record_sent_avatar(ctx, str(message_id), display_name, user_id)
+                sent_items.append(f"{display_name}(qq={user_id})")
+
+            return "已发送 QQ 头像：" + "、".join(sent_items)
+        except QQAvatarError as e:
+            logger.warning(f"发送 QQ 头像失败: {e}")
+            return f"发送 QQ 头像失败: {e}"
+        except httpx.HTTPError as e:
+            logger.warning(f"发送 QQ 头像网络请求失败: {type(e).__name__}: {e}")
+            return f"发送 QQ 头像失败: 网络请求失败 {type(e).__name__}: {e}"
+        except Exception as e:
+            logger.exception(f"发送 QQ 头像工具异常: {e}")
+            return f"发送 QQ 头像失败: {type(e).__name__}: {e}"
+
+    return send_qq_avatar_image
+
+
 async def healthcheck(ctx: OptionalToolContext) -> tuple[bool, str]:
     return True, "ok"
 
@@ -352,16 +435,21 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
     if ctx.is_cross_user_direct_reply:
         return OptionalToolBundle(name="qq_avatar")
 
-    prompt = f"""- QQ 头像：可使用 `fetch_qq_avatar_references` 获取群成员或指定 QQ 号的头像参考图
-  - 用户说“给某人头像...”或“用某人的头像...”时，先调用本工具，再调用后续图片工具
+    prompt = f"""- QQ 头像：
+  - 用户只是要求“发 / 发送 / 看看 / 查看某人的 QQ 头像或原头像”时：
+    调用 `send_qq_avatar_image`，直接把原头像发到群里；不要调用生图工具
+  - 用户要求“用某人头像做图 / 给某人头像二创 / 把某人头像生成某种风格”时：
+    调用 `fetch_qq_avatar_references` 获取参考图 path，再调用后续图片工具
   - `target_user_names` 可填群名片、昵称、QQ号；“我/自己”表示当前发起用户
-  - 工具会返回本地头像图片 `path`
-  - 后续图片工具需要参考图时，把返回的 `path` 填入对应的参考图路径参数
+  - `fetch_qq_avatar_references` 只返回本地头像图片 `path`，不会发送图片
   - 当前最多获取 {QQ_AVATAR_MAX_REFERENCE_AVATARS} 个用户头像
 """
     return OptionalToolBundle(
         name="qq_avatar",
-        tools=[create_qq_avatar_tool(ctx)],
+        tools=[create_qq_avatar_tool(ctx), create_send_qq_avatar_tool(ctx)],
         prompt=prompt,
-        tool_limits=[ToolLimitSpec(tool_name="fetch_qq_avatar_references", run_limit=1)],
+        tool_limits=[
+            ToolLimitSpec(tool_name="fetch_qq_avatar_references", run_limit=1),
+            ToolLimitSpec(tool_name="send_qq_avatar_image", run_limit=1),
+        ],
     )

@@ -102,13 +102,6 @@ plugins = ["nonebot_plugin_ai_groupmate"]
 | `ai_groupmate__remote_media_embedding_dimensions` | `2560` | 图片 embedding 维度 |
 | `ai_groupmate__media_search_recall_limit` | `6` | 表情包检索召回候选数 |
 | `ai_groupmate__media_search_return_limit` | `5` | 表情包检索最终返回数 |
-| `ai_groupmate__voice_enabled` | `false` | 是否启用语音用户工具 |
-| `ai_groupmate__voice_base_url` | 空 | GPT-SoVITS 服务地址，供语音用户工具使用 |
-| `ai_groupmate__voice_text_lang` | `zh` | 语音用户工具目标文本语言 |
-| `ai_groupmate__voice_speed_factor` | `1.0` | 语音用户工具语速 |
-| `ai_groupmate__voice_top_k` | `15` | 语音用户工具 GPT-SoVITS top_k |
-| `ai_groupmate__voice_top_p` | `1.0` | 语音用户工具 GPT-SoVITS top_p |
-| `ai_groupmate__voice_temperature` | `1.0` | 语音用户工具 GPT-SoVITS temperature |
 
 </details>
 

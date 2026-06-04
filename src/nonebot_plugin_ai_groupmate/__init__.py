@@ -711,6 +711,46 @@ def _build_bound_message(
     return item
 
 
+def _is_image_history_record(msg: ChatHistory) -> bool:
+    return msg.content_type == "image" or (msg.content_type == "bot" and msg.media_id is not None)
+
+
+async def _append_local_bound_image(
+    db_session,
+    msg: ChatHistory,
+    bound_images: list[dict[str, str]],
+    media_ids: list[int],
+    label_prefix: str,
+) -> bool:
+    if msg.media_id is None:
+        return False
+
+    media_obj = await db_session.get(MediaStorage, msg.media_id)
+    if media_obj is None or not media_obj.file_path:
+        return False
+
+    file_path = pic_dir / media_obj.file_path
+    if not file_path.exists():
+        return False
+
+    try:
+        image_url = _image_to_data_uri(file_path)
+    except Exception as e:
+        logger.warning(f"读取本地被回复图片失败 msg_id={msg.msg_id}: {type(e).__name__}: {e}")
+        return False
+
+    bound_image = {
+        "label": label_prefix if not bound_images else f"{label_prefix}{len(bound_images) + 1}",
+        "image_url": image_url,
+    }
+    note = _extract_content_body(msg.content)
+    if note and note != "[图片]":
+        bound_image["note"] = note[:80]
+    bound_images.append(bound_image)
+    media_ids.append(int(msg.media_id))
+    return True
+
+
 async def _build_reply_binding_from_payload(
     bot: Bot,
     payload: Any,
@@ -902,42 +942,27 @@ async def _build_reply_binding(
     image_rows = 0
     for msg in replied_messages:
         body = _extract_content_body(msg.content)
+        if _is_image_history_record(msg):
+            image_rows += 1
+            image_text = body if body and body != "[图片]" else "[图片]"
+            bound_messages.append(
+                _build_bound_message("被回复图片消息", msg.user_name, "image", image_text, msg.msg_id)
+            )
+            await _append_local_bound_image(
+                db_session,
+                msg,
+                bound_images,
+                media_ids,
+                "被回复图片",
+            )
+            continue
+
         if msg.content_type == "text" or msg.content_type == "bot":
             if body:
                 bound_messages.append(
                     _build_bound_message("被回复消息", msg.user_name, msg.content_type, body, msg.msg_id)
                 )
             continue
-
-        if msg.content_type != "image":
-            continue
-
-        image_rows += 1
-        image_text = body if body and body != "[图片]" else "[图片]"
-        bound_messages.append(
-            _build_bound_message("被回复图片消息", msg.user_name, "image", image_text, msg.msg_id)
-        )
-        if msg.media_id is None:
-            continue
-        media_obj = await db_session.get(MediaStorage, msg.media_id)
-        if media_obj is None or not media_obj.file_path:
-            continue
-        file_path = pic_dir / media_obj.file_path
-        if not file_path.exists():
-            continue
-        try:
-            image_url = _image_to_data_uri(file_path)
-            bound_image = {
-                "label": "被回复图片" if not bound_images else f"被回复图片{len(bound_images) + 1}",
-                "image_url": image_url,
-            }
-            note = _extract_content_body(msg.content)
-            if note and note != "[图片]":
-                bound_image["note"] = note[:80]
-            bound_images.append(bound_image)
-            media_ids.append(int(msg.media_id))
-        except Exception as e:
-            logger.warning(f"读取本地被回复图片失败 msg_id={normalized_reply_id}: {type(e).__name__}: {e}")
 
     if bound_messages or bound_images:
         logger.info(

@@ -728,7 +728,12 @@ def create_relation_tool(
     """
 
     @tool("update_user_impression")
-    async def update_user_impression(score_change: int, reason: str, add_tags: list[str], remove_tags: list[str]) -> str:
+    async def update_user_impression(
+        score_change: int,
+        reason: str,
+        add_tags: list[str] | str | None = None,
+        remove_tags: list[str] | str | None = None,
+    ) -> str:
         """
         更新对当前对话用户的好感度和印象标签。
         当用户的言行让你产生情绪波动，或者你发现旧的印象不再准确时调用。
@@ -743,6 +748,27 @@ def create_relation_tool(
         """
         if request_id is not None and not await is_request_active(session_id, request_id):
             return "请求已过期，已取消更新。"
+
+        def normalize_tags(value: list[str] | str | None) -> list[str]:
+            if value is None:
+                return []
+            if isinstance(value, str):
+                value = value.strip()
+                if not value:
+                    return []
+                try:
+                    parsed = json.loads(value)
+                except json.JSONDecodeError:
+                    return [tag.strip() for tag in value.split(",") if tag.strip()]
+                if isinstance(parsed, list):
+                    return [str(tag).strip() for tag in parsed if str(tag).strip()]
+                if isinstance(parsed, str) and parsed.strip():
+                    return [parsed.strip()]
+                return []
+            return [str(tag).strip() for tag in value if str(tag).strip()]
+
+        add_tags = normalize_tags(add_tags)
+        remove_tags = normalize_tags(remove_tags)
 
         try:
             async with get_session() as db_session:
@@ -1038,6 +1064,10 @@ def _parse_msg_meta(content: str) -> tuple[str | None, str | None, str]:
 
     body = "\n".join(lines[body_start:]).strip()
     return own_id, reply_to_id, body
+
+
+def _is_image_history(msg: ChatHistorySchema) -> bool:
+    return msg.content_type == "image" or (msg.content_type == "bot" and msg.media_id is not None)
 
 
 def _build_emoji_like_candidates(history: list[ChatHistorySchema], max_items: int = 6) -> str:
@@ -1414,7 +1444,7 @@ async def format_chat_history(
         display_name = _strip_role_prefix(msg.user_name)
         if not own_id:
             continue
-        if msg.content_type == "image":
+        if _is_image_history(msg):
             snippet = "[图片]"
             if body and body != "[图片]":
                 snippet = f"图片：{body[:20]}{'…' if len(body) > 20 else ''}"
@@ -1442,14 +1472,18 @@ async def format_chat_history(
             else:
                 reply_prefix = ""
 
-            if msg.content_type == "bot":
-                transcript_lines.append(f"[{time_str}] {plugin_config.bot_name}: {body or msg.content}")
-            elif msg.content_type == "image":
+            if _is_image_history(msg):
                 image_summary = f"（简述：{body}）" if body and body != "[图片]" else ""
-                line = f"[{time_str}] {role_prefix}{display_name}: {reply_prefix}"
+                line = (
+                    f"[{time_str}] {plugin_config.bot_name}: {reply_prefix}"
+                    if msg.content_type == "bot"
+                    else f"[{time_str}] {role_prefix}{display_name}: {reply_prefix}"
+                )
                 transcript_lines.append(
                     f"{line}发送了一张图片{image_summary} [历史图片已省略]"
                 )
+            elif msg.content_type == "bot":
+                transcript_lines.append(f"[{time_str}] {plugin_config.bot_name}: {body or msg.content}")
             else:
                 transcript_lines.append(f"[{time_str}] {role_prefix}{display_name}: {reply_prefix}{body}")
 
@@ -1500,7 +1534,7 @@ async def format_chat_history(
 
         return messages
 
-    image_indices = [i for i, m in enumerate(history) if m.content_type == "image"]
+    image_indices = [i for i, m in enumerate(history) if _is_image_history(m)]
     if omit_images or bound_images or disable_inline_history_images:
         inline_image_set: set[int] = set()
     else:
@@ -1536,7 +1570,7 @@ async def format_chat_history(
         else:
             reply_prefix = ""
 
-        if msg.content_type == "bot":
+        if msg.content_type == "bot" and not _is_image_history(msg):
             messages.append(AIMessage(content=body or msg.content))
             continue
 
@@ -1545,16 +1579,22 @@ async def format_chat_history(
             messages.append(HumanMessage(content=content))
             continue
 
-        if msg.content_type == "image":
+        if _is_image_history(msg):
             image_summary = f"（简述：{body}）" if body and body != "[图片]" else ""
-            prefix_text = f"[{time_str}] {role_prefix}{display_name} {reply_prefix}发送了一张图片{image_summary}"
+            is_bot_image = msg.content_type == "bot"
+            prefix_text = (
+                f"[{time_str}] {plugin_config.bot_name} {reply_prefix}发送了一张图片{image_summary}"
+                if is_bot_image
+                else f"[{time_str}] {role_prefix}{display_name} {reply_prefix}发送了一张图片{image_summary}"
+            )
             media_id = int(msg.media_id) if msg.media_id is not None else None
             file_name = media_path_map.get(media_id) if media_id is not None else None
             if idx in inline_image_set and file_name:
                 image_data = get_image_data_uri(file_name)
                 if image_data:
+                    message_cls = AIMessage if is_bot_image else HumanMessage
                     messages.append(
-                        HumanMessage(
+                        message_cls(
                             content=[
                                 {"type": "text", "text": f"{prefix_text}："},
                                 {"type": "image_url", "image_url": {"url": image_data}},
@@ -1564,7 +1604,8 @@ async def format_chat_history(
                     continue
 
             fallback = f"{prefix_text} [{'图片已省略' if omit_images else '图片'}]"
-            messages.append(HumanMessage(content=fallback))
+            message_cls = AIMessage if is_bot_image else HumanMessage
+            messages.append(message_cls(content=fallback))
 
     if binding_notice:
         messages.append(HumanMessage(content=binding_notice))

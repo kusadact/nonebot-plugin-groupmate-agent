@@ -29,7 +29,10 @@ QQ_AVATAR_CACHE_SECONDS = 3600
 
 class FetchQQAvatarArgs(BaseModel):
     target_user_names: list[str] | str = Field(
-        description="要获取头像的当前群成员昵称、群名片或 QQ 号；“我/自己”表示当前发起用户。",
+        description=(
+            "要获取头像的当前群成员昵称、群名片或 QQ 号；"
+            "“我/自己”表示当前发起用户，“你/你自己/bot/机器人/bot名”表示 bot 自己。"
+        ),
     )
 
 
@@ -128,6 +131,20 @@ def _member_display_name(member: Any, fallback: str) -> str:
         or str(getattr(getattr(member, "user", None), "name", "") or "").strip()
         or fallback
     )
+
+
+def _avatar_target_key(value: str) -> str:
+    target = _strip_at(value).casefold()
+    target = re.sub(r"(的)?(?:qq)?头像$", "", target, flags=re.IGNORECASE).strip()
+    if target.endswith("自己"):
+        target = target[: -len("自己")].strip()
+    return target
+
+
+def _is_bot_avatar_target(raw_name: str, ctx: OptionalToolContext) -> bool:
+    target = _avatar_target_key(raw_name)
+    bot_name = _normalize_text(str(getattr(ctx.config, "bot_name", "") or "")).casefold()
+    return target in {"你", "bot", "机器人"} or bool(bot_name and target == bot_name)
 
 
 async def _resolve_members(ctx: OptionalToolContext) -> list[Any]:
@@ -314,7 +331,11 @@ async def _resolve_avatar_targets(
     seen_ids: set[str] = set()
     for raw_name in raw_names:
         member = None
+        display_name: str | None = None
         user_id = _extract_qq_id(raw_name)
+        if user_id is None and _is_bot_avatar_target(raw_name, ctx):
+            user_id = _extract_numeric_id(str(ctx.bot_id or ""))
+            display_name = _normalize_text(str(getattr(ctx.config, "bot_name", "") or "")) or "bot"
         if user_id is None:
             if not members:
                 raise QQAvatarError("无法获取当前群成员列表，不能按昵称获取头像；可直接提供 QQ 号")
@@ -326,7 +347,7 @@ async def _resolve_avatar_targets(
             raise QQAvatarError(f"无法解析群成员“{raw_name}”的 QQ 号")
         if user_id in seen_ids:
             continue
-        display_name = _member_display_name(member, raw_name) if member is not None else raw_name
+        display_name = display_name or (_member_display_name(member, raw_name) if member is not None else raw_name)
         targets.append((user_id, display_name))
         seen_ids.add(user_id)
     return targets
@@ -343,7 +364,8 @@ def create_qq_avatar_tool(ctx: OptionalToolContext):
         返回的 path 可作为其它图片编辑/生图工具的本地参考图路径。
 
         Args:
-            target_user_names: 当前群成员昵称、群名片或 QQ 号；“我/自己”表示当前发起用户。
+            target_user_names: 当前群成员昵称、群名片或 QQ 号；“我/自己”表示当前发起用户；
+                “你/你自己/bot/机器人/bot名”表示 bot 自己。
         """
         if ctx.request_id is not None and not await can_request_continue(ctx.session_id, ctx.request_id):
             return "请求已过期，已取消获取头像。"
@@ -389,7 +411,8 @@ def create_send_qq_avatar_tool(ctx: OptionalToolContext):
         不会生成、编辑或改造图片。
 
         Args:
-            target_user_names: 当前群成员昵称、群名片或 QQ 号；“我/自己”表示当前发起用户。
+            target_user_names: 当前群成员昵称、群名片或 QQ 号；“我/自己”表示当前发起用户；
+                “你/你自己/bot/机器人/bot名”表示 bot 自己。
         """
         if ctx.request_id is not None and not await can_request_continue(ctx.session_id, ctx.request_id):
             return "请求已过期，已取消发送头像。"
@@ -440,7 +463,7 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
     调用 `send_qq_avatar_image`，直接把原头像发到群里；不要调用生图工具
   - 用户要求“用某人头像做图 / 给某人头像二创 / 把某人头像生成某种风格”时：
     调用 `fetch_qq_avatar_references` 获取参考图 path，再调用后续图片工具
-  - `target_user_names` 可填群名片、昵称、QQ号；“我/自己”表示当前发起用户
+  - `target_user_names` 可填群名片、昵称、QQ号；“我/自己”表示当前发起用户；“你/你自己/bot/机器人/{getattr(ctx.config, "bot_name", "bot")}”表示 bot 自己
   - `fetch_qq_avatar_references` 只返回本地头像图片 `path`，不会发送图片
   - 当前最多获取 {QQ_AVATAR_MAX_REFERENCE_AVATARS} 个用户头像
 """

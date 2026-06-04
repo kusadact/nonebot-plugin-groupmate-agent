@@ -73,6 +73,9 @@ plugins = ["nonebot_plugin_ai_groupmate"]
 
 如果需要自定义各模型的 API 参数，可使用下面高级配置里的配置项。
 
+用户自定义工具应放在 bot 数据目录下的 `data/nonebot_plugin_ai_groupmate/tools`。
+可参考工具仓库 [`kusadact/ai-groupmate-tools`](https://github.com/kusadact/ai-groupmate-tools)，其中存放了适用于本插件的用户自定义 Agent 工具实例。
+
 <details>
 <summary>高级配置</summary>
 
@@ -112,19 +115,18 @@ plugins = ["nonebot_plugin_ai_groupmate"]
 <details>
 <summary>自定义 Agent 工具</summary>
 
-用户自定义工具应放在 bot 数据目录下的 `data/nonebot_plugin_ai_groupmate/tools`。
-可参考工具仓库 [`kusadact/ai-groupmate-tools`](https://github.com/kusadact/ai-groupmate-tools)，其中存放了适用于本插件的用户自定义 Agent 工具实例。
-
 支持两种文件形式：
 
 - `data/nonebot_plugin_ai_groupmate/tools/my_tool.py`
 - `data/nonebot_plugin_ai_groupmate/tools/my_tool/__init__.py`
 
-工具模块需要提供 `build(ctx)`，可选提供 `healthcheck(ctx)`；健康检查返回不通过时，该工具和它的 prompt 都不会注入 Agent。
+工具模块需要提供 `build(ctx)`，可选提供 `healthcheck(ctx)`；两者都可以是同步或异步函数。健康检查返回不通过时，该工具和它的 prompt 都不会注入 Agent。
 
 ```python
-from langchain.tools import tool
-from nonebot_plugin_ai_groupmate.agent.optional_tools import OptionalToolBundle, OptionalToolContext
+from typing import Any
+
+from langchain.tools import ToolRuntime, tool
+from nonebot_plugin_ai_groupmate.agent.optional_tools import OptionalToolBundle, OptionalToolContext, ToolLimitSpec
 
 
 async def healthcheck(ctx: OptionalToolContext) -> tuple[bool, str]:
@@ -133,16 +135,20 @@ async def healthcheck(ctx: OptionalToolContext) -> tuple[bool, str]:
 
 async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
     @tool
-    async def my_tool(text: str) -> str:
+    async def my_tool(text: str, runtime: ToolRuntime[Any]) -> str:
         """工具说明会提供给模型。"""
-        return text
+        # runtime 由 Agent 图执行器注入，不会暴露给模型填写。
+        return f"{runtime.context.session_id}: {text}"
 
     return OptionalToolBundle(
         name="my_tool",
         tools=[my_tool],
         prompt="- 需要调用 my_tool 时，优先给出明确的 text 参数",
+        tool_limits=[ToolLimitSpec(tool_name="my_tool", run_limit=1)],
     )
 ```
+
+如果工具函数声明了 `runtime: ToolRuntime[Any]` 参数，图执行器会自动注入运行时上下文；可以从 `runtime.context.session_id`、`runtime.context.request_id` 读取当前会话和请求信息。`tool_limits` 可限制本轮工具调用次数，`tool_name=None` 表示调整全局工具调用上限。
 
 长耗时工具可以在确认任务已经开始后使用 detached 生命周期，让后台任务脱离当前 Agent 等待，当前请求结束后仍可发送结果：
 
@@ -165,7 +171,11 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
             return "图片生成任务已开始，完成后会发送结果。"
         return "当前请求不支持后台长任务。"
 
-    return OptionalToolBundle(name="image_tool", tools=[generate_image_tool])
+    return OptionalToolBundle(
+        name="image_tool",
+        tools=[generate_image_tool],
+        tool_limits=[ToolLimitSpec(tool_name="generate_image_tool", run_limit=1)],
+    )
 ```
 
 `ctx.create_detached_task(...)` 会负责注册 detached 状态、记录异常并在后台任务结束后清理状态。

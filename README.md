@@ -180,8 +180,8 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
 - **群聊 Agent**
   - 基于 LangGraph 状态图 + LangChain Tool Calling 驱动群聊回复，主对话模型使用 OpenAI 兼容接口
   - 默认使用阿里云 DashScope / 通义千问；主对话、总结、多模态和图片 embedding 已内置默认模型和地址，填写 `qwen_key` 即可使用
-  - 联网搜索、消息评论表情、禁言、QQ 头像参考图和计算器已拆为内置 Agent 可选工具模块；用户自定义工具从 `data/nonebot_plugin_ai_groupmate/tools` 加载；联网搜索不健康时不会注入工具和 prompt
-  - 支持联网搜索、历史聊天检索、表情包搜索/发送、消息评论表情、QQ 头像参考图、关系更新和禁言管理；放入对应用户工具后可扩展更多能力
+  - 联网搜索、消息评论表情、禁言、QQ 头像参考图、QQ 头像内容描述和计算器已拆为内置 Agent 可选工具模块；用户自定义工具从 `data/nonebot_plugin_ai_groupmate/tools` 加载；联网搜索不健康时不会注入工具和 prompt
+  - 支持联网搜索、历史聊天检索、表情包搜索/发送、消息评论表情、QQ 头像参考图、QQ 头像内容描述、关系更新和禁言管理；放入对应用户工具后可扩展更多能力
   - 直接 @/回复 请求会各自启动独立 Agent task，不会因同群新消息过期，也不会被前一个直达请求阻塞
   - 普通概率回复按群内小队列限流；有直达请求运行时会跳过普通概率回复，避免群聊刷屏堆积
   - 直接 @/回复 场景会按本轮消息回复；旧直达消息只作为背景，不会被后续直达请求再次执行

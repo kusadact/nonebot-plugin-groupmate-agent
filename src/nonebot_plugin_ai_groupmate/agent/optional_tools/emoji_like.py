@@ -3,8 +3,8 @@ import re
 from dataclasses import dataclass
 
 from langchain.tools import tool
-from nonebot import get_bot
 from nonebot.log import logger
+from nonebot_plugin_alconna import message_reaction
 
 from ...reply_guard import can_request_continue
 from .types import OptionalToolBundle, OptionalToolContext, ToolLimitSpec
@@ -454,8 +454,24 @@ def _resolve_emoji_like(emoji_name: str | None) -> EmojiLike:
 
 def extract_emoji_like_message_id_text(raw: str | None) -> str | None:
     text = str(raw or "").strip()
-    match = re.search(r"\d+", text)
-    return match.group() if match else None
+    if not text:
+        return None
+
+    if text.lower() in {"current_event", "current", "event", "none", "null", "system"}:
+        return None
+
+    labeled_match = re.search(
+        r"\b(?:msg_id|message_id|id)[:=：]\s*([A-Za-z0-9_.-]{1,128})",
+        text,
+    )
+    if labeled_match:
+        return labeled_match.group(1)
+
+    if re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", text):
+        return text
+
+    number_match = re.search(r"\d+", text)
+    return number_match.group() if number_match else None
 
 
 def create_emoji_like_tool(
@@ -463,6 +479,8 @@ def create_emoji_like_tool(
     request_id: str | None,
     bot_id: str | None,
     allowed_message_ids: set[str] | None = None,
+    bot=None,
+    event=None,
 ):
     """Create the message reaction tool bound to the current request."""
 
@@ -483,47 +501,43 @@ def create_emoji_like_tool(
         """
         if request_id is not None and not await can_request_continue(session_id, request_id):
             return "请求已过期，已取消评论表情。"
-        if not bot_id:
-            return "无法获取 bot ID，评论表情失败。"
+        if bot is None or event is None:
+            return "评论表情失败: 缺少 bot/event 上下文，无法调用 message_reaction。"
 
         message_id_text = extract_emoji_like_message_id_text(target_msg_id)
         if message_id_text is None:
-            return f"评论表情失败: 无法从 target_msg_id 中提取有效数字: {target_msg_id!r}"
+            return f"评论表情失败: 无法从 target_msg_id 中提取有效消息 ID: {target_msg_id!r}"
         if allowed_message_ids is not None and message_id_text not in allowed_message_ids:
             return "评论表情失败: target_msg_id 不在本轮可评论表情候选消息里。"
 
-        message_id = int(message_id_text)
         emoji = _resolve_emoji_like(emoji_name)
 
         try:
-            bot = get_bot(bot_id)
-            if not hasattr(bot, "call_api"):
-                return "当前适配器不支持评论表情功能。"
-
             if request_id is not None and not await can_request_continue(session_id, request_id):
                 return "请求已过期，已取消评论表情。"
 
-            await bot.call_api(
-                "set_msg_emoji_like",
-                message_id=message_id,
-                emoji_id=emoji.id,
-                set=True,
+            await message_reaction(
+                emoji.id,
+                message_id=message_id_text,
+                event=event,
+                bot=bot,
+                delete=False,
             )
             logger.info(
                 "评论表情成功: session_id=%s message_id=%s emoji_id=%s emoji_name=%s category=%s reason=%s",
                 session_id,
-                message_id,
+                message_id_text,
                 emoji.id,
                 emoji.meaning,
                 emoji.category,
                 reason or "",
             )
-            return f"已给消息 {message_id} 添加评论表情“{emoji.meaning}”。"
+            return f"已给消息 {message_id_text} 添加评论表情“{emoji.meaning}”。"
         except Exception as e:
             logger.warning(
                 "评论表情失败: session_id=%s message_id=%s emoji_id=%s emoji_name=%s error=%s",
                 session_id,
-                message_id,
+                message_id_text,
                 emoji.id,
                 emoji.meaning,
                 e,
@@ -553,6 +567,8 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
         ctx.request_id,
         ctx.bot_id,
         ctx.emoji_like_candidate_ids,
+        ctx.bot,
+        ctx.event,
     )
     return OptionalToolBundle(
         name="emoji_like",

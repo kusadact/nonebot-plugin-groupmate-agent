@@ -102,6 +102,8 @@ class ReplyRequest:
     request_id: str
     session: Uninfo
     interface: QryItrface
+    bot: Bot
+    event: Event
     bot_name: str
     bot_id: str
     user_id: str
@@ -176,6 +178,8 @@ async def _execute_reply_request(group_id: str, request: ReplyRequest) -> None:
                 request.request_id,
                 request.session,
                 request.interface,
+                request.bot,
+                request.event,
                 request.bot_name,
                 request.bot_id,
                 request.user_id,
@@ -1540,6 +1544,8 @@ async def handle_message(
             request_id=f"{group_id}:{datetime.datetime.now().timestamp()}:{random.random()}",
             session=session,
             interface=interface,
+            bot=bot,
+            event=event,
             bot_name=plugin_config.bot_name,
             bot_id=str(bot.self_id),
             user_id=user_id,
@@ -1697,6 +1703,8 @@ async def handle_reply_logic(
     request_id: str,
     session: Uninfo,
     interface: QryItrface,
+    bot: Bot,
+    event: Event,
     bot_name: str,
     bot_id: str,
     user_id: str,
@@ -1805,6 +1813,8 @@ async def handle_reply_logic(
                     disable_inline_history_images,
                     binding_notice,
                     direct_targets,
+                    bot,
+                    event,
                 ),
                 timeout=240.0,
             )

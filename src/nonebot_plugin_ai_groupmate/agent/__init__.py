@@ -15,6 +15,7 @@ from langchain.tools import ToolRuntime, tool
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from nonebot import get_plugin_config, require
+from nonebot.adapters import Bot, Event
 from nonebot.log import logger
 from nonebot_plugin_alconna import UniMessage
 from nonebot_plugin_orm import get_session
@@ -1159,6 +1160,8 @@ async def create_chat_agent(
     bot_id: str | None = None,
     emoji_like_candidate_ids: set[str] | None = None,
     direct_targets: list[dict[str, Any]] | None = None,
+    bot: Bot | None = None,
+    event: Event | None = None,
 ):
     """创建聊天 Agent。"""
     has_direct_targets = bool(direct_targets)
@@ -1219,6 +1222,8 @@ async def create_chat_agent(
         config=plugin_config,
         model=model,
         stop_words=stop_words,
+        bot=bot,
+        event=event,
     )
     if request_id is not None:
 
@@ -1666,6 +1671,8 @@ async def choice_response_strategy(
     disable_inline_history_images: bool = False,
     binding_notice: str | None = None,
     direct_targets: list[dict[str, Any]] | None = None,
+    bot: Bot | None = None,
+    event: Event | None = None,
 ):
     """
     使用 Agent 决定回复策略。
@@ -1687,6 +1694,8 @@ async def choice_response_strategy(
             bot_id,
             emoji_like_candidate_ids,
             direct_targets,
+            bot,
+            event,
         )
 
         chat_history_messages = await format_chat_history(

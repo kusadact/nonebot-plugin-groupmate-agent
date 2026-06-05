@@ -40,3 +40,5 @@ class OptionalToolContext:
     mark_sent: Callable[[], None] | None = None
     clear_detached: Callable[[], None] | None = None
     create_detached_task: Callable[[Coroutine[Any, Any, Any], str], Any] | None = None
+    bot: Any | None = None
+    event: Any | None = None

@@ -42,13 +42,13 @@ def get_user_tools_dir() -> Path:
     require("nonebot_plugin_localstore")
     import nonebot_plugin_localstore as store
 
-    tools_dir = store.get_data_dir("nonebot_plugin_ai_groupmate") / "tools"
+    tools_dir = store.get_data_dir("nonebot_plugin_groupmate_agent") / "tools"
     tools_dir.mkdir(parents=True, exist_ok=True)
     return tools_dir
 
 
 def _module_display_name(module: ModuleType) -> str:
-    tool_name = getattr(module, "__ai_groupmate_tool_name__", None)
+    tool_name = getattr(module, "__groupmate_agent_tool_name__", None)
     if tool_name:
         return str(tool_name)
     return module.__name__.rsplit(".", 1)[-1]
@@ -75,7 +75,7 @@ def _iter_user_tool_paths(tools_dir: Path) -> list[Path]:
 
 def _load_user_tool_module_result(path: Path) -> tuple[ModuleType | None, str]:
     tool_name = path.parent.name if path.name == "__init__.py" else path.stem
-    module_name = f"_ai_groupmate_user_tool_{_safe_module_name(tool_name)}"
+    module_name = f"_groupmate_agent_user_tool_{_safe_module_name(tool_name)}"
     search_locations = [str(path.parent)] if path.name == "__init__.py" else None
     spec = importlib.util.spec_from_file_location(module_name, path, submodule_search_locations=search_locations)
     if spec is None or spec.loader is None:
@@ -87,7 +87,7 @@ def _load_user_tool_module_result(path: Path) -> tuple[ModuleType | None, str]:
             sys.modules.pop(loaded_name, None)
 
     module = importlib.util.module_from_spec(spec)
-    module.__ai_groupmate_tool_name__ = tool_name
+    module.__groupmate_agent_tool_name__ = tool_name
     sys.modules[module_name] = module
     try:
         spec.loader.exec_module(module)

@@ -3,12 +3,14 @@
     <img src="https://raw.githubusercontent.com/fllesser/nonebot-plugin-template/refs/heads/resource/.docs/NoneBotPlugin.svg" width="310" alt="logo">
   </a>
 
-## ✨ nonebot-plugin-ai-groupmate ✨
+## ✨ nonebot-plugin-groupmate-agent ✨
 
 </div>
 
 ## 📖 介绍
-这是一个基于 NoneBot2 的 AI 群友插件，使用 LangGraph 状态图执行群聊 Agent，并保留 LangChain Tool Calling / 工具生态。
+这是一个基于 NoneBot2 的群友 Agent 插件，使用 LangGraph 状态图执行群聊 Agent，并保留 LangChain Tool Calling / 工具生态。
+
+`nonebot-plugin-groupmate-agent` 是从 `nonebot-plugin-ai-groupmate` 分离出来的独立插件线。当前版本不保留旧包名、旧配置前缀或旧数据目录入口；请使用新的模块名 `nonebot_plugin_groupmate_agent`、配置前缀 `groupmate_agent__` 和数据目录 `data/nonebot_plugin_groupmate_agent`。
 
 从 `3.0.0` 起，主 Agent 执行器已从 LangChain `create_agent` 迁移到 LangGraph `StateGraph`：
 模型仍使用 `ChatOpenAI` 及兼容的 Tool Calling，现有 `@tool` 工具、内置可选工具和用户自定义工具接口保持兼容。
@@ -50,13 +52,13 @@
 直接用 `uv` 安装这个插件：
 
 ```bash
-uv add git+https://github.com/kusadact/nonebot-plugin-ai-groupmate@dev
+uv add git+https://github.com/kusadact/nonebot-plugin-groupmate-agent@dev
 ```
 
 然后打开你的 NoneBot2 项目根目录下的 `pyproject.toml` 文件，在 `[tool.nonebot]` 部分追加写入：
 
 ```toml
-plugins = ["nonebot_plugin_ai_groupmate"]
+plugins = ["nonebot_plugin_groupmate_agent"]
 ```
 
 ## ⚙️ 配置
@@ -65,51 +67,51 @@ plugins = ["nonebot_plugin_ai_groupmate"]
 
 | 配置项 | 默认值 | 说明 |
 |:--|:--|:--|
-| `ai_groupmate__bot_name` | `bot` | bot 名称 |
-| `ai_groupmate__reply_probability` | `0.01` | 群内主动发言概率 |
-| `ai_groupmate__personality_setting` | 空 | 自定义人设补充 |
-| `ai_groupmate__qwen_key` | 空 | 阿里云 DashScope API Key，默认供主对话、总结、多模态和图片 embedding 使用 |
-| `ai_groupmate__remote_embedding_base_url` | 空 | 文本 embedding 地址 |
-| `ai_groupmate__remote_embedding_model` | 空 | 文本 embedding 模型名 |
-| `ai_groupmate__remote_embedding_api_key` | 空 | 文本 embedding API Key |
-| `ai_groupmate__remote_rerank_base_url` | 空 | 文本 rerank 地址 |
-| `ai_groupmate__remote_rerank_model` | 空 | 文本 rerank 模型名 |
-| `ai_groupmate__remote_rerank_api_key` | 空 | 文本 rerank API Key |
-| `ai_groupmate__qdrant_uri` | 空 | Qdrant 地址；不填则禁用 RAG / 表情包向量功能 |
-| `ai_groupmate__qdrant_api_key` | 空 | Qdrant API Key |
-| `ai_groupmate__tavily_api_key` | 空 | Tavily 搜索 API Key |
+| `groupmate_agent__bot_name` | `bot` | bot 名称 |
+| `groupmate_agent__reply_probability` | `0.01` | 群内主动发言概率 |
+| `groupmate_agent__personality_setting` | 空 | 自定义人设补充 |
+| `groupmate_agent__qwen_key` | 空 | 阿里云 DashScope API Key，默认供主对话、总结、多模态和图片 embedding 使用 |
+| `groupmate_agent__remote_embedding_base_url` | 空 | 文本 embedding 地址 |
+| `groupmate_agent__remote_embedding_model` | 空 | 文本 embedding 模型名 |
+| `groupmate_agent__remote_embedding_api_key` | 空 | 文本 embedding API Key |
+| `groupmate_agent__remote_rerank_base_url` | 空 | 文本 rerank 地址 |
+| `groupmate_agent__remote_rerank_model` | 空 | 文本 rerank 模型名 |
+| `groupmate_agent__remote_rerank_api_key` | 空 | 文本 rerank API Key |
+| `groupmate_agent__qdrant_uri` | 空 | Qdrant 地址；不填则禁用 RAG / 表情包向量功能 |
+| `groupmate_agent__qdrant_api_key` | 空 | Qdrant API Key |
+| `groupmate_agent__tavily_api_key` | 空 | Tavily 搜索 API Key |
 
 如果需要自定义各模型的 API 参数，可使用下面高级配置里的配置项。
 
-用户自定义工具应放在 bot 数据目录下的 `data/nonebot_plugin_ai_groupmate/tools`。
-可参考工具仓库 [`kusadact/ai-groupmate-tools`](https://github.com/kusadact/ai-groupmate-tools)，其中存放了适用于本插件的用户自定义 Agent 工具实例。
+用户自定义工具应放在 bot 数据目录下的 `data/nonebot_plugin_groupmate_agent/tools`。
+可参考工具仓库 [`kusadact/groupmate-agent-tools`](https://github.com/kusadact/groupmate-agent-tools)，其中存放了适用于本插件的用户自定义 Agent 工具实例。
 
 <details>
 <summary>高级配置</summary>
 
 | 配置项 | 默认值 | 说明 |
 |:--|:--|:--|
-| `ai_groupmate__base_url` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | 主对话模型 base URL |
-| `ai_groupmate__model` | `qwen3.5-plus` | 主对话模型名，需支持 Tool Calling |
-| `ai_groupmate__openai_base_url` | 空 | 主对话模型 base URL，配置后优先于 `base_url` |
-| `ai_groupmate__openai_model` | 空 | 主对话模型名，配置后优先于 `model` |
-| `ai_groupmate__openai_token` | 空 | 主对话模型 API Key；配置后优先于 `qwen_key` |
-| `ai_groupmate__summary_base_url` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | 总结模型 base URL |
-| `ai_groupmate__summary_model` | `qwen-flash` | 群体认知档案总结模型 |
-| `ai_groupmate__summary_api_key` | 空 | 总结模型 API Key |
-| `ai_groupmate__multimodal_base_url` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | 多模态模型 base URL |
-| `ai_groupmate__multimodal_model` | `qwen-vl-max` | 图片理解模型 |
-| `ai_groupmate__multimodal_api_key` | 空 | 多模态模型 API Key |
-| `ai_groupmate__remote_media_embedding_provider` | `dashscope` | 图片 embedding 提供方：可选 `openai` / `dashscope` |
-| `ai_groupmate__remote_media_embedding_base_url` | `https://dashscope.aliyuncs.com/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding` | 图片 embedding 地址 |
-| `ai_groupmate__remote_media_embedding_model` | `qwen3-vl-embedding` | 图片 embedding 模型名 |
-| `ai_groupmate__remote_media_embedding_api_key` | 空 | 图片 embedding API Key |
-| `ai_groupmate__chat_vector_dim` | `1024` | 聊天文本向量维度 |
-| `ai_groupmate__media_vector_dim` | `2560` | 图片向量维度 |
-| `ai_groupmate__remote_embedding_dimensions` | `1024` | 文本 embedding 维度 |
-| `ai_groupmate__remote_media_embedding_dimensions` | `2560` | 图片 embedding 维度 |
-| `ai_groupmate__media_search_recall_limit` | `6` | 表情包检索召回候选数 |
-| `ai_groupmate__media_search_return_limit` | `5` | 表情包检索最终返回数 |
+| `groupmate_agent__base_url` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | 主对话模型 base URL |
+| `groupmate_agent__model` | `qwen3.5-plus` | 主对话模型名，需支持 Tool Calling |
+| `groupmate_agent__openai_base_url` | 空 | 主对话模型 base URL，配置后优先于 `base_url` |
+| `groupmate_agent__openai_model` | 空 | 主对话模型名，配置后优先于 `model` |
+| `groupmate_agent__openai_token` | 空 | 主对话模型 API Key；配置后优先于 `qwen_key` |
+| `groupmate_agent__summary_base_url` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | 总结模型 base URL |
+| `groupmate_agent__summary_model` | `qwen-flash` | 群体认知档案总结模型 |
+| `groupmate_agent__summary_api_key` | 空 | 总结模型 API Key |
+| `groupmate_agent__multimodal_base_url` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | 多模态模型 base URL |
+| `groupmate_agent__multimodal_model` | `qwen-vl-max` | 图片理解模型 |
+| `groupmate_agent__multimodal_api_key` | 空 | 多模态模型 API Key |
+| `groupmate_agent__remote_media_embedding_provider` | `dashscope` | 图片 embedding 提供方：可选 `openai` / `dashscope` |
+| `groupmate_agent__remote_media_embedding_base_url` | `https://dashscope.aliyuncs.com/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding` | 图片 embedding 地址 |
+| `groupmate_agent__remote_media_embedding_model` | `qwen3-vl-embedding` | 图片 embedding 模型名 |
+| `groupmate_agent__remote_media_embedding_api_key` | 空 | 图片 embedding API Key |
+| `groupmate_agent__chat_vector_dim` | `1024` | 聊天文本向量维度 |
+| `groupmate_agent__media_vector_dim` | `2560` | 图片向量维度 |
+| `groupmate_agent__remote_embedding_dimensions` | `1024` | 文本 embedding 维度 |
+| `groupmate_agent__remote_media_embedding_dimensions` | `2560` | 图片 embedding 维度 |
+| `groupmate_agent__media_search_recall_limit` | `6` | 表情包检索召回候选数 |
+| `groupmate_agent__media_search_return_limit` | `5` | 表情包检索最终返回数 |
 
 </details>
 
@@ -118,8 +120,8 @@ plugins = ["nonebot_plugin_ai_groupmate"]
 
 支持两种文件形式：
 
-- `data/nonebot_plugin_ai_groupmate/tools/my_tool.py`
-- `data/nonebot_plugin_ai_groupmate/tools/my_tool/__init__.py`
+- `data/nonebot_plugin_groupmate_agent/tools/my_tool.py`
+- `data/nonebot_plugin_groupmate_agent/tools/my_tool/__init__.py`
 
 工具模块需要提供 `build(ctx)`，可选提供 `healthcheck(ctx)`；两者都可以是同步或异步函数。健康检查返回不通过时，该工具和它的 prompt 都不会注入 Agent。
 
@@ -127,7 +129,7 @@ plugins = ["nonebot_plugin_ai_groupmate"]
 from typing import Any
 
 from langchain.tools import ToolRuntime, tool
-from nonebot_plugin_ai_groupmate.agent.optional_tools import OptionalToolBundle, OptionalToolContext, ToolLimitSpec
+from nonebot_plugin_groupmate_agent.agent.optional_tools import OptionalToolBundle, OptionalToolContext, ToolLimitSpec
 
 
 async def healthcheck(ctx: OptionalToolContext) -> tuple[bool, str]:
@@ -188,7 +190,7 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
 - **群聊 Agent**
   - 基于 LangGraph 状态图 + LangChain Tool Calling 驱动群聊回复，主对话模型使用 OpenAI 兼容接口
   - 默认使用阿里云 DashScope / 通义千问；主对话、总结、多模态和图片 embedding 已内置默认模型和地址，填写 `qwen_key` 即可使用
-  - 联网搜索、消息评论表情、禁言、QQ 头像参考图、QQ 头像内容描述和计算器已拆为内置 Agent 可选工具模块；用户自定义工具从 `data/nonebot_plugin_ai_groupmate/tools` 加载；联网搜索不健康时不会注入工具和 prompt
+  - 联网搜索、消息评论表情、禁言、QQ 头像参考图、QQ 头像内容描述和计算器已拆为内置 Agent 可选工具模块；用户自定义工具从 `data/nonebot_plugin_groupmate_agent/tools` 加载；联网搜索不健康时不会注入工具和 prompt
   - 支持联网搜索、历史聊天检索、表情包搜索/发送、消息评论表情、QQ 头像参考图、QQ 头像内容描述、关系更新和禁言管理；放入对应用户工具后可扩展更多能力
   - 直接 @/回复 请求会各自启动独立 Agent task，不会因同群新消息过期，也不会被前一个直达请求阻塞
   - 普通概率回复按群内小队列限流；有直达请求运行时会跳过普通概率回复，避免群聊刷屏堆积

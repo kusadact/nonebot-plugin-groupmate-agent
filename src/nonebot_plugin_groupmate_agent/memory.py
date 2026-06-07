@@ -21,7 +21,7 @@ CHAT_COLLECTION = "chat_collection"
 MEDIA_COLLECTION = "media_collection"
 DASHSCOPE_MULTIMODAL_BATCH_LIMIT = 5
 
-plugin_config = get_plugin_config(Config).ai_groupmate
+plugin_config = get_plugin_config(Config).groupmate_agent
 MEDIA_SEARCH_RECALL_LIMIT = max(1, int(plugin_config.media_search_recall_limit))
 MEDIA_SEARCH_RETURN_LIMIT = max(1, int(plugin_config.media_search_return_limit))
 

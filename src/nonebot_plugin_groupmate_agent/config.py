@@ -142,4 +142,4 @@ class ScopedConfig(BaseModel):
 
 
 class Config(BaseModel):
-    ai_groupmate: ScopedConfig = Field(default_factory=ScopedConfig)
+    groupmate_agent: ScopedConfig = Field(default_factory=ScopedConfig)

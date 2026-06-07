@@ -51,7 +51,7 @@ import nonebot_plugin_localstore as store
 plugin_data_dir = store.get_plugin_data_dir()
 pic_dir = plugin_data_dir / "pics"
 plugin_path = Path(__file__).parent
-plugin_config = get_plugin_config(Config).ai_groupmate
+plugin_config = get_plugin_config(Config).groupmate_agent
 with open(Path(__file__).parent.parent / "stop_words.txt", encoding="utf-8") as f:
     stop_words = f.read().splitlines() + ["id", "回复"]
 

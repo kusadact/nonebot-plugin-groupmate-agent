@@ -1,7 +1,7 @@
 """scale daily favorability units to raw
 
-迁移 ID: e1a6f4d3c2b8
-父迁移: d2a4f3bc1b9e
+迁移 ID: e3b7c9a1d502
+父迁移: d8e1a4f6c920
 创建时间: 2026-03-03 11:00:00.000000
 
 """
@@ -13,12 +13,26 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "e1a6f4d3c2b8"
-down_revision: str | Sequence[str] | None = "d2a4f3bc1b9e"
+revision: str = "e3b7c9a1d502"
+down_revision: str | Sequence[str] | None = "d8e1a4f6c920"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-TABLE = "nonebot_plugin_ai_groupmate_userrelation_v2"
+TABLE = "nonebot_plugin_groupmate_agent_userrelation"
+MIGRATION_STATE_TABLE = "nonebot_plugin_groupmate_agent_migration_state"
+
+
+def _daily_units_already_scaled() -> bool:
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    if MIGRATION_STATE_TABLE not in set(inspector.get_table_names()):
+        return False
+
+    exists = bind.execute(
+        sa.text(f"SELECT 1 FROM {MIGRATION_STATE_TABLE} WHERE key = 'daily_units_scaled' LIMIT 1")
+    ).first()
+    op.drop_table(MIGRATION_STATE_TABLE)
+    return exists is not None
 
 
 def upgrade(name: str = "") -> None:
@@ -29,6 +43,8 @@ def upgrade(name: str = "") -> None:
     inspector = sa.inspect(bind)
     tables = set(inspector.get_table_names())
     if TABLE not in tables:
+        return
+    if _daily_units_already_scaled():
         return
 
     columns = {col["name"] for col in inspector.get_columns(TABLE)}
@@ -86,4 +102,3 @@ def downgrade(name: str = "") -> None:
 
     with op.batch_alter_table(TABLE, schema=None) as batch_op:
         batch_op.alter_column("daily_cap", server_default="7")
-

@@ -230,7 +230,7 @@ def _safe_filename_part(value: str) -> str:
 
 
 def _avatar_cache_root() -> Path:
-    return store.get_data_dir("nonebot_plugin_ai_groupmate") / "qq_avatar_references"
+    return store.get_data_dir("nonebot_plugin_groupmate_agent") / "qq_avatar_references"
 
 
 def _get_avatar_cache_dir(ctx: OptionalToolContext) -> Path:

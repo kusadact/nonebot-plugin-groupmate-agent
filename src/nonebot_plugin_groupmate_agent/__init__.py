@@ -7,6 +7,7 @@ import re
 import base64
 import mimetypes
 import urllib.request
+import shutil
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -31,11 +32,23 @@ require("nonebot_plugin_localstore")
 require("nonebot_plugin_apscheduler")
 import nonebot_plugin_localstore as store
 from sqlalchemy import Select, desc, func as sqlfunc
-from nonebot_plugin_orm import get_session, async_scoped_session
 from nonebot_plugin_uninfo import Uninfo, SceneType, QryItrface
 from nonebot_plugin_alconna import Image, UniMessage, image_fetch, get_message_id
 from nonebot_plugin_apscheduler import scheduler
 from nonebot_plugin_alconna.uniseg import UniMsg
+
+
+def _cleanup_orm_migration_cache() -> None:
+    migrations_dir = store.get_data_dir("nonebot_plugin_orm") / "migrations"
+    for plugin_name in ("nonebot_plugin_ai_groupmate", "nonebot_plugin_groupmate_agent"):
+        cache_dir = migrations_dir / plugin_name
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir)
+
+
+_cleanup_orm_migration_cache()
+
+from nonebot_plugin_orm import get_session, async_scoped_session
 
 from .agent import check_if_should_reply, choice_response_strategy
 from .model import ChatHistory, MediaStorage, ChatHistorySchema, GroupMemory
@@ -50,11 +63,11 @@ from .reply_guard import clear_request_active, clear_request_sent, is_request_de
 from .agent.optional_tools import OptionalToolContext, list_optional_tool_statuses
 
 __plugin_meta__ = PluginMetadata(
-    name="nonebot-plugin-ai-groupmate",
-    description="AI虚拟群友",
+    name="nonebot-plugin-groupmate-agent",
+    description="群友 Agent",
     usage="@bot 让bot进行回复\n/词频 <统计天数>\n/群词频<统计天数>",
     type="application",
-    homepage="https://github.com/kusadact/nonebot-plugin-ai-groupmate",
+    homepage="https://github.com/kusadact/nonebot-plugin-groupmate-agent",
     config=Config,
     supported_adapters=inherit_supported_adapters("nonebot_plugin_alconna", "nonebot_plugin_uninfo"),
     extra={"author": "kusadact <959472968@qq.com>"},
@@ -62,7 +75,7 @@ __plugin_meta__ = PluginMetadata(
 plugin_data_dir: Path = store.get_plugin_data_dir()
 pic_dir = plugin_data_dir / "pics"
 pic_dir.mkdir(parents=True, exist_ok=True)
-plugin_config = get_plugin_config(Config).ai_groupmate
+plugin_config = get_plugin_config(Config).groupmate_agent
 with open(Path(__file__).parent / "stop_words.txt", encoding="utf-8") as f:
     stop_words = f.read().splitlines() + ["id", "回复"]
 
@@ -633,7 +646,7 @@ def _extract_text_from_message_obj(message_obj: Any) -> str:
 
 
 def _download_bytes_from_url(url: str, timeout: float = 15.0) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": "nonebot-plugin-ai-groupmate/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "nonebot-plugin-groupmate-agent/1.0"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
 
@@ -1867,7 +1880,7 @@ frequency = on_command("词频")
 @frequency.handle()
 async def _(db_session: async_scoped_session, session: Uninfo, arg: Message = CommandArg()):
     if not _is_enabled():
-        await frequency.finish("ai_groupmate disabled")
+        await frequency.finish("groupmate_agent disabled")
     session_id = session.scene.id
     arg_text = arg.extract_plain_text().strip()
     if not arg_text:
@@ -1890,7 +1903,7 @@ group_frequency = on_command("群词频")
 @group_frequency.handle()
 async def _(db_session: async_scoped_session, session: Uninfo, arg: Message = CommandArg()):
     if not _is_enabled():
-        await group_frequency.finish("ai_groupmate disabled")
+        await group_frequency.finish("groupmate_agent disabled")
     session_id = session.scene.id
     arg_text = arg.extract_plain_text().strip()
     if not arg_text:

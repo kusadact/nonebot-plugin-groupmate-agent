@@ -43,15 +43,15 @@ class ChatHistory(Model):
     vectorized: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
     __table_args__ = (
-        Index("ix_chat_session_time", "session_id", "created_at"),
+        Index("ix_nonebot_plugin_groupmate_agent_chathistory_session_time", "session_id", "created_at"),
     )
 
 
 class UserRelation(Model):
     """用户关系/好感度表"""
 
-    __tablename__ = "nonebot_plugin_ai_groupmate_userrelation_v2"
-    __table_args__ = (UniqueConstraint("user_id", name="uq_nonebot_plugin_ai_groupmate_userrelation_v2_user_id"),)
+    __tablename__ = "nonebot_plugin_groupmate_agent_userrelation"
+    __table_args__ = (UniqueConstraint("user_id", name="uq_nonebot_plugin_groupmate_agent_userrelation_user_id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[str] = mapped_column(index=True)

@@ -10,11 +10,12 @@ from typing import Any
 from nonebot import require
 from nonebot.log import logger
 
-from . import calculator, emoji_like, moderation, qq_avatar, qq_avatar_describer, web_search
+from . import calculator, emoji_like, moderation, qq_avatar, qq_avatar_describer, scheduled_tasks, web_search
 from .types import OptionalToolBundle, OptionalToolContext
 
 BUILTIN_TOOL_MODULES = [
     web_search,
+    scheduled_tasks,
     emoji_like,
     moderation,
     qq_avatar,

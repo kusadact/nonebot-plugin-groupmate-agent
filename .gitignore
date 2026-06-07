@@ -1,6 +1,10 @@
 # Python cache / bytecode
 __pycache__/
 *.py[cod]
+.coverage
+.pytest_cache/
+coverage.xml
+htmlcov/
 
 # macOS metadata
 .DS_Store

@@ -5,6 +5,10 @@
 
 ## ✨ nonebot-plugin-groupmate-agent ✨
 
+  <a href="https://codecov.io/gh/kusadact/nonebot-plugin-groupmate-agent">
+    <img src="https://codecov.io/gh/kusadact/nonebot-plugin-groupmate-agent/graph/badge.svg" alt="codecov">
+  </a>
+
 </div>
 
 ## 📖 介绍

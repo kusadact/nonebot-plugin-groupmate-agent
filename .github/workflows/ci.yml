@@ -9,6 +9,8 @@ on:
       - ".github/workflows/**"
       - "src/nonebot_plugin_groupmate_agent/**"
       - "scripts/**"
+      - "tests/**"
+      - "codecov.yml"
       - "pyproject.toml"
       - "uv.lock"
   pull_request:
@@ -16,6 +18,8 @@ on:
       - ".github/workflows/**"
       - "src/nonebot_plugin_groupmate_agent/**"
       - "scripts/**"
+      - "tests/**"
+      - "codecov.yml"
       - "pyproject.toml"
       - "uv.lock"
   workflow_dispatch:
@@ -28,6 +32,8 @@ jobs:
   check:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -54,6 +60,19 @@ jobs:
 
       - name: Ruff
         run: uv run ruff check . --select E9,F63,F7,F82
+
+      - name: Test
+        run: uv run pytest
+
+      - name: Upload coverage to Codecov
+        if: matrix.python-version == '3.13' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          flags: python
+          name: python-3.13
+          fail_ci_if_error: true
 
       - name: Compile
         run: uv run python -m compileall -q src/nonebot_plugin_groupmate_agent scripts

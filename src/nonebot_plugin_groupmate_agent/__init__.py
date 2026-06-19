@@ -33,7 +33,7 @@ require("nonebot_plugin_apscheduler")
 import nonebot_plugin_localstore as store
 from sqlalchemy import Select, desc, func as sqlfunc
 from nonebot_plugin_uninfo import Uninfo, SceneType, QryItrface
-from nonebot_plugin_alconna import Image, UniMessage, image_fetch, get_message_id
+from nonebot_plugin_alconna import Image, Target, UniMessage, image_fetch, get_message_id
 from nonebot_plugin_apscheduler import scheduler
 from nonebot_plugin_alconna.uniseg import UniMsg
 
@@ -1363,6 +1363,8 @@ async def _(bot: Bot, session: Uninfo, interface: QryItrface, arg: Message = Com
             config=plugin_config,
             model=None,
             stop_words=stop_words,
+            send_target=Target(id=session.scene.id, private=False, self_id=bot.self_id),
+            is_private=False,
         )
         statuses = await list_optional_tool_statuses(optional_ctx)
         await ai.finish(_format_tool_statuses(statuses))

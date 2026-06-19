@@ -2,7 +2,6 @@ import importlib.util
 import inspect
 import re
 import sys
-from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -11,7 +10,12 @@ from nonebot import require
 from nonebot.log import logger
 
 from . import calculator, emoji_like, moderation, qq_avatar, qq_avatar_describer, scheduled_tasks, web_search
-from .types import OptionalToolBundle, OptionalToolContext
+from .registry import (
+    build_registered_agent_tool_bundles,
+    inspect_registered_agent_tool_factory,
+    iter_registered_agent_tool_factories,
+)
+from .types import OptionalToolBundle, OptionalToolContext, OptionalToolStatus
 
 BUILTIN_TOOL_MODULES = [
     web_search,
@@ -22,15 +26,6 @@ BUILTIN_TOOL_MODULES = [
     qq_avatar_describer,
     calculator,
 ]
-
-
-@dataclass
-class OptionalToolStatus:
-    name: str
-    source: str
-    enabled: bool
-    reason: str = ""
-    tool_names: list[str] = field(default_factory=list)
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -120,6 +115,12 @@ def _tool_name(tool_item: Any) -> str:
         or getattr(tool_item, "__name__", None)
         or type(tool_item).__name__
     )
+
+
+def _factory_source(factory: Any) -> str:
+    module = getattr(factory, "__module__", "")
+    name = str(getattr(factory, "__qualname__", None) or getattr(factory, "__name__", None) or type(factory).__name__)
+    return f"registered:{module}.{name}" if module else f"registered:{name}"
 
 
 async def _build_optional_tool_bundle(
@@ -216,6 +217,8 @@ async def load_optional_tool_bundles(ctx: OptionalToolContext) -> list[OptionalT
         if bundle is not None:
             bundles.append(bundle)
 
+    bundles.extend(await build_registered_agent_tool_bundles(ctx))
+
     return bundles
 
 
@@ -245,5 +248,21 @@ async def list_optional_tool_statuses(ctx: OptionalToolContext) -> list[Optional
             source=getattr(module, "__file__", module.__name__),
         )
         statuses.append(status)
+
+    for factory in iter_registered_agent_tool_factories():
+        source = _factory_source(factory)
+        bundle, reason = await inspect_registered_agent_tool_factory(factory, ctx)
+        if bundle is None:
+            name = source.removeprefix("registered:")
+            statuses.append(OptionalToolStatus(name=name, source=source, enabled=False, reason=reason))
+            continue
+        statuses.append(
+            OptionalToolStatus(
+                name=bundle.name,
+                source=source,
+                enabled=True,
+                tool_names=[_tool_name(tool_item) for tool_item in bundle.tools],
+            )
+        )
 
     return statuses

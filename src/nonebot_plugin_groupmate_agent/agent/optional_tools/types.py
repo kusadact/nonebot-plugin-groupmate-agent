@@ -18,6 +18,15 @@ class OptionalToolBundle:
 
 
 @dataclass
+class OptionalToolStatus:
+    name: str
+    source: str
+    enabled: bool
+    reason: str = ""
+    tool_names: list[str] = field(default_factory=list)
+
+
+@dataclass
 class OptionalToolContext:
     session_id: str
     request_id: str | None
@@ -35,10 +44,13 @@ class OptionalToolContext:
     config: Any
     model: Any
     stop_words: list[str]
+    db_session: Any | None = None
     detach_request: Callable[[str], None] | None = None
     can_continue: Callable[[], Awaitable[bool]] | None = None
     mark_sent: Callable[[], None] | None = None
     clear_detached: Callable[[], None] | None = None
     create_detached_task: Callable[[Coroutine[Any, Any, Any], str], Any] | None = None
+    send_target: Any | None = None
+    is_private: bool = False
     bot: Any | None = None
     event: Any | None = None

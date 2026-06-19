@@ -17,7 +17,7 @@ from langchain_openai import ChatOpenAI
 from nonebot import get_plugin_config, require
 from nonebot.adapters import Bot, Event
 from nonebot.log import logger
-from nonebot_plugin_alconna import UniMessage
+from nonebot_plugin_alconna import Target, UniMessage
 from nonebot_plugin_orm import get_session
 from nonebot_plugin_uninfo import QryItrface, SceneType
 from pydantic import BaseModel, Field, SecretStr, field_validator
@@ -40,9 +40,23 @@ from ..reply_guard import (
     unregister_detached_task,
 )
 from .graph import GraphToolLimit, build_chat_graph, make_agent_state
-from .optional_tools import OptionalToolContext, load_optional_tool_bundles
+from .optional_tools import (
+    AgentToolBundle,
+    AgentToolContext,
+    OptionalToolContext,
+    load_optional_tool_bundles,
+    register_agent_tool,
+)
 from .optional_tools.emoji_like import extract_emoji_like_message_id_text
 from .optional_tools.moderation import PERMISSION_STATUS
+
+__all__ = [
+    "AgentToolBundle",
+    "AgentToolContext",
+    "check_if_should_reply",
+    "choice_response_strategy",
+    "register_agent_tool",
+]
 
 require("nonebot_plugin_localstore")
 
@@ -1148,6 +1162,18 @@ def _collect_bound_message_ids(bound_messages: list[dict[str, str]] | None) -> s
     return candidate_ids
 
 
+def _is_private_event(event: Event | None) -> bool:
+    if event is None:
+        return False
+
+    for attr in ("message_type", "detail_type", "scene_type"):
+        value = getattr(event, attr, None)
+        if isinstance(value, str) and value.lower() == "private":
+            return True
+
+    return bool(getattr(event, "private", False) or getattr(event, "is_private", False))
+
+
 async def create_chat_agent(
     db_session,
     session_id: str,
@@ -1164,6 +1190,8 @@ async def create_chat_agent(
     event: Event | None = None,
 ):
     """创建聊天 Agent。"""
+    is_private = _is_private_event(event)
+    send_target = Target(id=session_id, private=is_private, self_id=bot_id)
     has_direct_targets = bool(direct_targets)
     is_multi_direct_reply = len(direct_targets or []) > 1
     direct_user_ids = {
@@ -1206,6 +1234,7 @@ async def create_chat_agent(
 """
 
     optional_ctx = OptionalToolContext(
+        db_session=db_session,
         session_id=session_id,
         request_id=request_id,
         user_id=str(user_id) if user_id else None,
@@ -1222,6 +1251,8 @@ async def create_chat_agent(
         config=plugin_config,
         model=model,
         stop_words=stop_words,
+        send_target=send_target,
+        is_private=is_private,
         bot=bot,
         event=event,
     )

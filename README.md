@@ -157,6 +157,41 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
 
 如果工具函数声明了 `runtime: ToolRuntime[Any]` 参数，图执行器会自动注入运行时上下文；可以从 `runtime.context.session_id`、`runtime.context.request_id` 读取当前会话和请求信息。`tool_limits` 可限制本轮工具调用次数，`tool_name=None` 表示调整全局工具调用上限。
 
+也支持从其他 NoneBot 插件中注册工具。只要注册代码所在模块被 NoneBot 加载，工具就会在每次创建 Agent 时按当前上下文动态加入：
+
+```python
+from langchain.tools import tool
+from nonebot import require
+
+require("nonebot_plugin_groupmate_agent")
+
+from nonebot_plugin_groupmate_agent.agent import (
+    AgentToolBundle,
+    AgentToolContext,
+    register_agent_tool,
+)
+from nonebot_plugin_groupmate_agent.agent.optional_tools import ToolLimitSpec
+
+
+@register_agent_tool
+def build_my_plugin_tools(ctx: AgentToolContext) -> AgentToolBundle:
+    @tool("get_current_session_id")
+    async def get_current_session_id() -> str:
+        """获取当前会话 ID。"""
+        return ctx.session_id
+
+    return AgentToolBundle(
+        name="my_plugin_tools",
+        tools=[get_current_session_id],
+        instructions=["- 需要知道当前群/会话 ID 时，调用 `get_current_session_id`"],
+        tool_limits=[ToolLimitSpec(tool_name="get_current_session_id", run_limit=1)],
+    )
+```
+
+在其他插件模块顶层导入本插件的注册 API 前，必须先调用 `require("nonebot_plugin_groupmate_agent")`，确保本插件在 NoneBot 插件加载上下文中初始化完成。
+
+注册式 factory 可以返回单个 LangChain tool、tool 列表、`AgentToolBundle`、`OptionalToolBundle` 或 `None`。`AgentToolContext` 会提供当前 `session_id`、`request_id`、触发用户、群成员接口、历史消息、direct reply 状态、权限、配置、模型、`send_target`、`bot/event` 和 detached 生命周期方法。需要按上下文禁用工具时，可以返回 `None` 或空 bundle；`/ai tools` 会显示注册式工具的启用状态。
+
 长耗时工具可以在确认任务已经开始后使用 detached 生命周期，让后台任务脱离当前 Agent 等待，当前请求结束后仍可发送结果：
 
 ```python

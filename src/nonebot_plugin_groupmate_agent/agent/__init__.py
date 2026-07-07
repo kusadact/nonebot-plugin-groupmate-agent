@@ -1188,6 +1188,7 @@ async def create_chat_agent(
     direct_targets: list[dict[str, Any]] | None = None,
     bot: Bot | None = None,
     event: Event | None = None,
+    recent_forward_messages: list[dict[str, Any]] | None = None,
 ):
     """创建聊天 Agent。"""
     is_private = _is_private_event(event)
@@ -1251,6 +1252,7 @@ async def create_chat_agent(
         config=plugin_config,
         model=model,
         stop_words=stop_words,
+        recent_forward_messages=recent_forward_messages or [],
         send_target=send_target,
         is_private=is_private,
         bot=bot,
@@ -1704,6 +1706,7 @@ async def choice_response_strategy(
     direct_targets: list[dict[str, Any]] | None = None,
     bot: Bot | None = None,
     event: Event | None = None,
+    recent_forward_messages: list[dict[str, Any]] | None = None,
 ):
     """
     使用 Agent 决定回复策略。
@@ -1727,6 +1730,7 @@ async def choice_response_strategy(
             direct_targets,
             bot,
             event,
+            recent_forward_messages,
         )
 
         chat_history_messages = await format_chat_history(

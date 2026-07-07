@@ -138,6 +138,15 @@ def test_registered_agent_tool_accepts_single_tool_return():
     registry.clear_registered_agent_tools()
 
 
+def test_registered_agent_tool_context_includes_recent_forward_messages():
+    ctx = make_ctx()
+    ctx.recent_forward_messages = [{"message_id": "101", "forward_id": "fwd-1"}]
+
+    agent_ctx = registry._make_agent_tool_context(ctx)
+
+    assert agent_ctx.recent_forward_messages == [{"message_id": "101", "forward_id": "fwd-1"}]
+
+
 def test_loader_includes_registered_tools_in_statuses():
     registry.clear_registered_agent_tools()
     loader.get_user_tools_dir = lambda: Path("/__groupmate_agent_no_user_tools__")

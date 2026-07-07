@@ -80,6 +80,8 @@ with open(Path(__file__).parent / "stop_words.txt", encoding="utf-8") as f:
     stop_words = f.read().splitlines() + ["id", "回复"]
 
 _MAX_NORMAL_REPLY_QUEUE_SIZE = 1
+_RECENT_FORWARD_MESSAGE_MAX_COUNT = 20
+_RECENT_FORWARD_MESSAGE_TTL = datetime.timedelta(hours=1)
 
 
 class PermanentMultimodalError(Exception):
@@ -128,6 +130,7 @@ class ReplyRequest:
     disable_inline_history_images: bool
     binding_notice: str | None
     direct_targets: list[dict[str, Any]] = field(default_factory=list)
+    recent_forward_messages: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -141,6 +144,7 @@ class GroupReplyState:
 _group_reply_states: dict[str, GroupReplyState] = {}
 _group_reply_state_lock = asyncio.Lock()
 _direct_reply_tasks: set[asyncio.Task[Any]] = set()
+_recent_forward_messages: dict[str, list[dict[str, Any]]] = {}
 
 
 def _build_direct_reply_context(
@@ -203,6 +207,7 @@ async def _execute_reply_request(group_id: str, request: ReplyRequest) -> None:
                 request.disable_inline_history_images,
                 request.binding_notice,
                 request.direct_targets,
+                request.recent_forward_messages,
             )
     finally:
         await clear_request_active(group_id, request.request_id)
@@ -623,6 +628,103 @@ def _segment_type_and_data(seg: Any) -> tuple[str | None, dict[str, Any]]:
     seg_type = getattr(seg, "type", None)
     seg_data = getattr(seg, "data", None) or {}
     return seg_type, seg_data if isinstance(seg_data, dict) else {}
+
+
+def _extract_forward_ids_from_message_obj(message_obj: Any) -> list[str]:
+    forward_ids: list[str] = []
+    seen: set[str] = set()
+    for seg in _iter_message_segments(message_obj):
+        seg_type, seg_data = _segment_type_and_data(seg)
+        if seg_type != "forward":
+            continue
+
+        if isinstance(seg, dict):
+            raw_id = seg_data.get("id") or seg.get("id") or seg.get("forward_id")
+        else:
+            raw_id = seg_data.get("id") or getattr(seg, "id", None) or getattr(seg, "forward_id", None)
+        forward_id = str(raw_id or "").strip()
+        if not forward_id or forward_id in seen:
+            continue
+        seen.add(forward_id)
+        forward_ids.append(forward_id)
+    return forward_ids
+
+
+def _event_message_candidates(event: Event) -> list[Any]:
+    candidates: list[Any] = []
+    for attr in ("message", "original_message"):
+        value = getattr(event, attr, None)
+        if value is not None:
+            candidates.append(value)
+    get_message = getattr(event, "get_message", None)
+    if callable(get_message):
+        try:
+            candidates.append(get_message())
+        except Exception:
+            pass
+    return candidates
+
+
+def _prune_recent_forward_messages(session_id: str, now: datetime.datetime | None = None) -> None:
+    bucket = _recent_forward_messages.get(session_id)
+    if not bucket:
+        return
+
+    current = now or datetime.datetime.now()
+    cutoff = current - _RECENT_FORWARD_MESSAGE_TTL
+    bucket[:] = [
+        item
+        for item in bucket
+        if isinstance(item.get("created_at"), datetime.datetime) and item["created_at"] >= cutoff
+    ]
+    if len(bucket) > _RECENT_FORWARD_MESSAGE_MAX_COUNT:
+        del bucket[: len(bucket) - _RECENT_FORWARD_MESSAGE_MAX_COUNT]
+    if not bucket:
+        _recent_forward_messages.pop(session_id, None)
+
+
+def _remember_recent_forward_messages(
+    session_id: str,
+    message_id: str,
+    user_id: str,
+    user_name: str,
+    *message_candidates: Any,
+) -> None:
+    forward_ids: list[str] = []
+    seen: set[str] = set()
+    for candidate in message_candidates:
+        for forward_id in _extract_forward_ids_from_message_obj(candidate):
+            if forward_id in seen:
+                continue
+            seen.add(forward_id)
+            forward_ids.append(forward_id)
+    if not forward_ids:
+        return
+
+    now = datetime.datetime.now()
+    bucket = _recent_forward_messages.setdefault(session_id, [])
+    for forward_id in forward_ids:
+        bucket[:] = [
+            item
+            for item in bucket
+            if not (item.get("message_id") == message_id and item.get("forward_id") == forward_id)
+        ]
+        bucket.append(
+            {
+                "message_id": message_id,
+                "forward_id": forward_id,
+                "user_id": user_id,
+                "user_name": user_name,
+                "created_at": now,
+            }
+        )
+    _prune_recent_forward_messages(session_id, now)
+
+
+def _get_recent_forward_messages(session_id: str) -> list[dict[str, Any]]:
+    _prune_recent_forward_messages(session_id)
+    bucket = _recent_forward_messages.get(session_id) or []
+    return [dict(item) for item in reversed(bucket)]
 
 
 def _extract_text_from_message_obj(message_obj: Any) -> str:
@@ -1444,6 +1546,15 @@ async def handle_message(
     if session.member and session.member.nick:
         user_name = session.member.nick
 
+    _remember_recent_forward_messages(
+        session.scene.id,
+        current_message_id,
+        session.user.id,
+        user_name,
+        msg,
+        *_event_message_candidates(event),
+    )
+
     if is_text:
         chat_history = ChatHistory(
             session_id=session.scene.id,
@@ -1572,6 +1683,7 @@ async def handle_message(
             disable_inline_history_images=disable_inline_history_images,
             binding_notice=binding_notice,
             direct_targets=direct_targets,
+            recent_forward_messages=_get_recent_forward_messages(group_id),
         )
         async with _group_reply_state_lock:
             reply_state = _group_reply_states.setdefault(group_id, GroupReplyState())
@@ -1730,6 +1842,7 @@ async def handle_reply_logic(
     disable_inline_history_images: bool = False,
     binding_notice: str | None = None,
     direct_targets: list[dict[str, Any]] | None = None,
+    recent_forward_messages: list[dict[str, Any]] | None = None,
 ):
     """处理回复逻辑"""
     try:
@@ -1830,6 +1943,7 @@ async def handle_reply_logic(
                     direct_targets,
                     bot,
                     event,
+                    recent_forward_messages,
                 ),
                 timeout=240.0,
             )

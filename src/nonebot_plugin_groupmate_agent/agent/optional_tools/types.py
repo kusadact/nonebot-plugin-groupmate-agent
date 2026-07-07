@@ -44,6 +44,7 @@ class OptionalToolContext:
     config: Any
     model: Any
     stop_words: list[str]
+    recent_forward_messages: list[dict[str, Any]] = field(default_factory=list)
     db_session: Any | None = None
     detach_request: Callable[[str], None] | None = None
     can_continue: Callable[[], Awaitable[bool]] | None = None

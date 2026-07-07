@@ -28,6 +28,7 @@ class AgentToolContext:
     config: Any
     model: Any
     stop_words: list[str]
+    recent_forward_messages: list[dict[str, Any]] = field(default_factory=list)
     db_session: Any | None = None
     send_target: Any | None = None
     is_private: bool = False
@@ -112,6 +113,7 @@ def _make_agent_tool_context(ctx: OptionalToolContext) -> AgentToolContext:
         config=ctx.config,
         model=ctx.model,
         stop_words=ctx.stop_words,
+        recent_forward_messages=ctx.recent_forward_messages,
         detach_request=ctx.detach_request,
         can_continue=ctx.can_continue,
         mark_sent=ctx.mark_sent,

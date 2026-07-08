@@ -1,29 +1,29 @@
-import random
 import asyncio
-import datetime
-import traceback
-import json
-import re
 import base64
+import datetime
+import json
 import mimetypes
-import urllib.request
+import random
+import re
 import shutil
+import traceback
+import urllib.request
+from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-from dataclasses import dataclass, field
 
 import jieba
-from nonebot import logger, require, on_command, on_message, get_plugin_config, get_driver
-from nonebot.permission import SUPERUSER
-from pydantic import SecretStr
-from wordcloud import WordCloud
+from langchain_core.messages import HumanMessage as LCHumanMessage, SystemMessage as LCSystemMessage
+from langchain_openai import ChatOpenAI
+from nonebot import get_driver, get_plugin_config, logger, on_command, on_message, require
+from nonebot.adapters import Bot, Event, Message
 from nonebot.params import CommandArg
+from nonebot.permission import SUPERUSER
 from nonebot.plugin import PluginMetadata, inherit_supported_adapters
 from nonebot.typing import T_State
-from nonebot.adapters import Bot, Event, Message
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage as LCHumanMessage, SystemMessage as LCSystemMessage
+from pydantic import SecretStr
+from wordcloud import WordCloud
 
 require("nonebot_plugin_alconna")
 require("nonebot_plugin_orm")
@@ -31,11 +31,11 @@ require("nonebot_plugin_uninfo")
 require("nonebot_plugin_localstore")
 require("nonebot_plugin_apscheduler")
 import nonebot_plugin_localstore as store
-from sqlalchemy import Select, desc, func as sqlfunc
-from nonebot_plugin_uninfo import Uninfo, SceneType, QryItrface
-from nonebot_plugin_alconna import Image, Target, UniMessage, image_fetch, get_message_id
-from nonebot_plugin_apscheduler import scheduler
+from nonebot_plugin_alconna import Image, Target, UniMessage, get_message_id, image_fetch
 from nonebot_plugin_alconna.uniseg import UniMsg
+from nonebot_plugin_apscheduler import scheduler
+from nonebot_plugin_uninfo import QryItrface, SceneType, Uninfo
+from sqlalchemy import Select, desc, func as sqlfunc
 
 
 def _cleanup_orm_migration_cache() -> None:
@@ -48,19 +48,26 @@ def _cleanup_orm_migration_cache() -> None:
 
 _cleanup_orm_migration_cache()
 
-from nonebot_plugin_orm import get_session, async_scoped_session
+from nonebot_plugin_orm import async_scoped_session, get_session
 
 from .agent import check_if_should_reply, choice_response_strategy
-from .model import ChatHistory, MediaStorage, ChatHistorySchema, GroupMemory
-from .utils import (
-    generate_file_hash,
-    check_and_compress_image_bytes,
-    process_and_vectorize_session_chats,
-)
+from .agent.optional_tools import OptionalToolContext, list_optional_tool_statuses
 from .config import Config
 from .memory import DB
+from .model import ChatHistory, ChatHistorySchema, GroupMemory, MediaStorage
+from .recent_forward import (
+    RecentForwardMessageStore,
+    event_message_candidates as _event_message_candidates,
+    extract_text_from_message_obj as _extract_text_from_message_obj,
+    iter_message_segments as _iter_message_segments,
+    segment_type_and_data as _segment_type_and_data,
+)
 from .reply_guard import clear_request_active, clear_request_sent, is_request_detached, mark_request_active
-from .agent.optional_tools import OptionalToolContext, list_optional_tool_statuses
+from .utils import (
+    check_and_compress_image_bytes,
+    generate_file_hash,
+    process_and_vectorize_session_chats,
+)
 
 __plugin_meta__ = PluginMetadata(
     name="nonebot-plugin-groupmate-agent",
@@ -80,8 +87,6 @@ with open(Path(__file__).parent / "stop_words.txt", encoding="utf-8") as f:
     stop_words = f.read().splitlines() + ["id", "回复"]
 
 _MAX_NORMAL_REPLY_QUEUE_SIZE = 1
-_RECENT_FORWARD_MESSAGE_MAX_COUNT = 20
-_RECENT_FORWARD_MESSAGE_TTL = datetime.timedelta(hours=1)
 
 
 class PermanentMultimodalError(Exception):
@@ -144,7 +149,8 @@ class GroupReplyState:
 _group_reply_states: dict[str, GroupReplyState] = {}
 _group_reply_state_lock = asyncio.Lock()
 _direct_reply_tasks: set[asyncio.Task[Any]] = set()
-_recent_forward_messages: dict[str, list[dict[str, Any]]] = {}
+# Mutated only by synchronous helpers with no await points, so no asyncio lock is needed here.
+_recent_forward_messages = RecentForwardMessageStore()
 
 
 def _build_direct_reply_context(
@@ -584,105 +590,6 @@ def _image_bytes_to_data_uri(image_bytes: bytes, image_format: str | None = None
     return f"data:{mime_type};base64,{payload}"
 
 
-def _iter_message_segments(message_obj: Any):
-    if message_obj is None:
-        return
-
-    if isinstance(message_obj, dict):
-        seg_type = message_obj.get("type")
-        if seg_type:
-            yield message_obj
-        return
-
-    if isinstance(message_obj, (bytes, bytearray)):
-        message_obj = message_obj.decode("utf-8", errors="ignore")
-
-    if isinstance(message_obj, str):
-        for match in re.finditer(r"\[CQ:(\w+),([^\]]*)\]", message_obj):
-            seg_data: dict[str, str] = {}
-            raw_data = match.group(2)
-            if raw_data:
-                for item in raw_data.split(","):
-                    if "=" not in item:
-                        continue
-                    key, value = item.split("=", 1)
-                    seg_data[key] = value
-            yield {"type": match.group(1), "data": seg_data}
-        return
-
-    try:
-        iterator = iter(message_obj)
-    except TypeError:
-        return
-
-    for seg in iterator:
-        yield seg
-
-
-def _segment_type_and_data(seg: Any) -> tuple[str | None, dict[str, Any]]:
-    if isinstance(seg, dict):
-        seg_type = seg.get("type")
-        seg_data = seg.get("data") or {}
-        return seg_type, seg_data if isinstance(seg_data, dict) else {}
-
-    seg_type = getattr(seg, "type", None)
-    seg_data = getattr(seg, "data", None) or {}
-    return seg_type, seg_data if isinstance(seg_data, dict) else {}
-
-
-def _extract_forward_ids_from_message_obj(message_obj: Any) -> list[str]:
-    forward_ids: list[str] = []
-    seen: set[str] = set()
-    for seg in _iter_message_segments(message_obj):
-        seg_type, seg_data = _segment_type_and_data(seg)
-        if seg_type != "forward":
-            continue
-
-        if isinstance(seg, dict):
-            raw_id = seg_data.get("id") or seg.get("id") or seg.get("forward_id")
-        else:
-            raw_id = seg_data.get("id") or getattr(seg, "id", None) or getattr(seg, "forward_id", None)
-        forward_id = str(raw_id or "").strip()
-        if not forward_id or forward_id in seen:
-            continue
-        seen.add(forward_id)
-        forward_ids.append(forward_id)
-    return forward_ids
-
-
-def _event_message_candidates(event: Event) -> list[Any]:
-    candidates: list[Any] = []
-    for attr in ("message", "original_message"):
-        value = getattr(event, attr, None)
-        if value is not None:
-            candidates.append(value)
-    get_message = getattr(event, "get_message", None)
-    if callable(get_message):
-        try:
-            candidates.append(get_message())
-        except Exception:
-            pass
-    return candidates
-
-
-def _prune_recent_forward_messages(session_id: str, now: datetime.datetime | None = None) -> None:
-    bucket = _recent_forward_messages.get(session_id)
-    if not bucket:
-        return
-
-    current = now or datetime.datetime.now()
-    cutoff = current - _RECENT_FORWARD_MESSAGE_TTL
-    bucket[:] = [
-        item
-        for item in bucket
-        if isinstance(item.get("created_at"), datetime.datetime) and item["created_at"] >= cutoff
-    ]
-    if len(bucket) > _RECENT_FORWARD_MESSAGE_MAX_COUNT:
-        del bucket[: len(bucket) - _RECENT_FORWARD_MESSAGE_MAX_COUNT]
-    if not bucket:
-        _recent_forward_messages.pop(session_id, None)
-
-
 def _remember_recent_forward_messages(
     session_id: str,
     message_id: str,
@@ -690,61 +597,11 @@ def _remember_recent_forward_messages(
     user_name: str,
     *message_candidates: Any,
 ) -> None:
-    forward_ids: list[str] = []
-    seen: set[str] = set()
-    for candidate in message_candidates:
-        for forward_id in _extract_forward_ids_from_message_obj(candidate):
-            if forward_id in seen:
-                continue
-            seen.add(forward_id)
-            forward_ids.append(forward_id)
-    if not forward_ids:
-        return
-
-    now = datetime.datetime.now()
-    bucket = _recent_forward_messages.setdefault(session_id, [])
-    for forward_id in forward_ids:
-        bucket[:] = [
-            item
-            for item in bucket
-            if not (item.get("message_id") == message_id and item.get("forward_id") == forward_id)
-        ]
-        bucket.append(
-            {
-                "message_id": message_id,
-                "forward_id": forward_id,
-                "user_id": user_id,
-                "user_name": user_name,
-                "created_at": now,
-            }
-        )
-    _prune_recent_forward_messages(session_id, now)
+    _recent_forward_messages.remember(session_id, message_id, user_id, user_name, *message_candidates)
 
 
 def _get_recent_forward_messages(session_id: str) -> list[dict[str, Any]]:
-    _prune_recent_forward_messages(session_id)
-    bucket = _recent_forward_messages.get(session_id) or []
-    return [dict(item) for item in reversed(bucket)]
-
-
-def _extract_text_from_message_obj(message_obj: Any) -> str:
-    parts: list[str] = []
-    for seg in _iter_message_segments(message_obj):
-        seg_type, seg_data = _segment_type_and_data(seg)
-        if seg_type != "text":
-            continue
-        text = str(seg_data.get("text") or "").strip()
-        if text:
-            parts.append(text)
-
-    if parts:
-        return " ".join(parts)
-
-    if isinstance(message_obj, str):
-        text = re.sub(r"\[CQ:[^\]]+\]", "", message_obj)
-        return re.sub(r"\s+", " ", text).strip()
-
-    return ""
+    return _recent_forward_messages.get_newest_first(session_id)
 
 
 def _download_bytes_from_url(url: str, timeout: float = 15.0) -> bytes:
@@ -1493,6 +1350,7 @@ async def handle_message(
     """处理消息的主函数"""
     imgs = msg.include(Image)
     current_message_id = str(get_message_id())
+    group_id = session.scene.id
     content = f"id: {current_message_id}\n"
     body = ""
     to_me = False
@@ -1510,7 +1368,7 @@ async def handle_message(
                 at_targets.append(target_id)
             if target_id and target_id == str(bot.self_id):
                 to_me = True
-            members = await interface.get_members(SceneType.GROUP, session.scene.id)
+            members = await interface.get_members(SceneType.GROUP, group_id)
             for member in members:
                 if member.id == i.target:
                     name = member.user.name if member.user.name else ""
@@ -1547,17 +1405,16 @@ async def handle_message(
         user_name = session.member.nick
 
     _remember_recent_forward_messages(
-        session.scene.id,
+        group_id,
         current_message_id,
         session.user.id,
         user_name,
-        msg,
-        *_event_message_candidates(event),
+        *_event_message_candidates(event, msg),
     )
 
     if is_text:
         chat_history = ChatHistory(
-            session_id=session.scene.id,
+            session_id=group_id,
             user_id=session.user.id,
             content_type="text",
             content=content,
@@ -1590,7 +1447,7 @@ async def handle_message(
     plain_text = (msg.extract_plain_text() or event.get_plaintext() or "").strip()
     if await _try_auto_block_replied_meme(
         db_session,
-        session.scene.id,
+        group_id,
         session.user.id,
         event,
         bot,
@@ -1633,7 +1490,6 @@ async def handle_message(
         user_name = ""
 
     if should_reply:
-        group_id = session.scene.id
         (
             bound_messages,
             bound_images,
@@ -1694,7 +1550,8 @@ async def handle_message(
             if reply_state.active_direct_request_ids:
                 logger.debug(f"群 {group_id} 有直接触发待处理，跳过普通概率回复")
                 return
-            if not is_direct and sum(1 for item in reply_state.queue if not item.is_direct) >= _MAX_NORMAL_REPLY_QUEUE_SIZE:
+            normal_reply_queue_size = sum(1 for item in reply_state.queue if not item.is_direct)
+            if not is_direct and normal_reply_queue_size >= _MAX_NORMAL_REPLY_QUEUE_SIZE:
                 logger.debug(f"群 {group_id} 普通回复队列已满，跳过概率回复")
                 return
             reply_state.queue.append(request)
@@ -1966,7 +1823,11 @@ async def handle_reply_logic(
 
 def _build_wordcloud_image(words: str) -> BytesIO:
     """Generate a PNG image bytes object from words using WordCloud."""
-    wc = WordCloud(font_path=Path(__file__).parent / "SourceHanSans.otf", width=1000, height=500).generate(words).to_image()
+    wc = (
+        WordCloud(font_path=Path(__file__).parent / "SourceHanSans.otf", width=1000, height=500)
+        .generate(words)
+        .to_image()
+    )
     image_bytes = BytesIO()
     wc.save(image_bytes, format="PNG")
     image_bytes.seek(0)
@@ -2049,7 +1910,10 @@ async def vectorize_message_history():
             try:
                 res = await process_and_vectorize_session_chats(db_session, session_id)
                 if res:
-                    logger.info(f"向量化会话 {res['session_id']} 成功，共处理 {res['processed_groups']}/{res['total_groups']} 组")
+                    logger.info(
+                        f"向量化会话 {res['session_id']} 成功，"
+                        f"共处理 {res['processed_groups']}/{res['total_groups']} 组"
+                    )
                 else:
                     logger.info(f"{session_id} 无需向量化")
             except Exception as e:

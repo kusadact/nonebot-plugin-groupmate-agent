@@ -1,7 +1,6 @@
 import asyncio
 import base64
 import datetime
-import difflib
 import json
 import mimetypes
 import re
@@ -10,7 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import jieba
 from langchain.tools import ToolRuntime, tool
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -39,6 +37,7 @@ from ..reply_guard import (
     register_detached_task,
     unregister_detached_task,
 )
+from ..reply_segments import normalize_reply_text, semantic_similarity, split_reply_segments
 from .graph import GraphToolLimit, build_chat_graph, make_agent_state
 from .optional_tools import (
     AgentToolBundle,
@@ -298,69 +297,11 @@ def create_reply_tool(
     bot_id: str | None = None,
     allow_reply_duplicates: bool = False,
     check_recent_duplicate: bool = True,
+    split_on_newline: bool = False,
 ):
     """
     核心工具：用于发送消息。
     """
-
-    def _normalize_text(text: str) -> str:
-        return re.sub(r"\s+", " ", text).strip()
-
-    def _semantic_similarity(a: str, b: str) -> float:
-        if not a or not b:
-            return 0.0
-        if a == b:
-            return 1.0
-
-        seq_ratio = difflib.SequenceMatcher(None, a, b).ratio()
-        a_tokens = {t for t in jieba.lcut(a) if t.strip()}
-        b_tokens = {t for t in jieba.lcut(b) if t.strip()}
-        if not a_tokens or not b_tokens:
-            return seq_ratio
-
-        inter = len(a_tokens & b_tokens)
-        union = len(a_tokens | b_tokens)
-        jaccard = inter / union if union else 0.0
-        return max(seq_ratio, jaccard)
-
-    def _dedupe_consecutive_lines(text: str) -> str:
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        if not lines:
-            return text
-        deduped: list[str] = []
-        for line in lines:
-            if deduped and deduped[-1] == line:
-                continue
-            deduped.append(line)
-        return "\n".join(deduped)
-
-    def _split_reply_segments(text: str) -> list[str]:
-        normalized_text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
-        if not normalized_text:
-            return []
-
-        deduped_text = normalized_text if allow_reply_duplicates else _dedupe_consecutive_lines(normalized_text)
-        raw_segments = [line.strip() for line in deduped_text.split("\n") if line.strip()]
-        if not raw_segments:
-            return []
-
-        segments: list[str] = []
-        for raw_segment in raw_segments:
-            normalized_segment = _normalize_text(raw_segment)
-            if not normalized_segment:
-                continue
-
-            if segments and not allow_reply_duplicates:
-                previous_segment = _normalize_text(segments[-1])
-                if _semantic_similarity(previous_segment, normalized_segment) >= 0.9:
-                    continue
-
-            if len(segments) < 3:
-                segments.append(raw_segment)
-            else:
-                segments[-1] = f"{segments[-1]} {raw_segment}".strip()
-
-        return segments
 
     async def _build_name_to_id_map() -> dict[str, str]:
         name_to_id: dict[str, str] = {}
@@ -409,10 +350,10 @@ def create_reply_tool(
             return False
 
         _, _, latest_body = _parse_msg_meta(latest_bot_msg.content)
-        latest_normalized = _normalize_text(latest_body or latest_bot_msg.content)
-        normalized_content = _normalize_text(content)
+        latest_normalized = normalize_reply_text(latest_body or latest_bot_msg.content)
+        normalized_content = normalize_reply_text(content)
         recent = datetime.datetime.now() - latest_bot_msg.created_at <= datetime.timedelta(seconds=90)
-        similarity = _semantic_similarity(latest_normalized, normalized_content)
+        similarity = semantic_similarity(latest_normalized, normalized_content)
         if recent and similarity >= 0.9:
             logger.info(f"检测到近义重复回复(相似度={similarity:.2f})，已自动跳过")
             return True
@@ -501,7 +442,7 @@ def create_reply_tool(
         向当前群聊发送文本回复。
         注意：如果你想对用户说话，必须调用这个工具。不要直接返回文本。
         Args:
-            content: 你想发送的内容。
+            content: 你想发送的内容。普通换行会保留在同一条消息内；需要连续发送多条消息时，用单独一行 /n 分隔。
         """
         if request_id is not None and not await is_request_active(session_id, request_id):
             return "请求已过期，已取消发送。"
@@ -510,7 +451,11 @@ def create_reply_tool(
             return "内容为空，未发送。"
 
         try:
-            segments = _split_reply_segments(content)
+            segments = split_reply_segments(
+                content,
+                allow_reply_duplicates=allow_reply_duplicates,
+                split_on_newline=split_on_newline,
+            )
             if not segments:
                 return "内容为空，未发送。"
 
@@ -754,7 +699,8 @@ def create_relation_tool(
         当用户的言行让你产生情绪波动，或者你发现旧的印象不再准确时调用。
 
         参数:
-        - score_change: 好感度意图变化值（raw 单位，正数加分，负数扣分）。常规建议 -20~+20，极端上限 -50~+50；最终实际变化会被状态、日上限、bank、道歉衰减等规则二次调整。
+        - score_change: 好感度意图变化值（raw 单位，正数加分，负数扣分）。
+          常规建议 -20~+20，极端上限 -50~+50；最终实际变化会被状态、日上限、bank、道歉衰减等规则二次调整。
         - reason: 变更原因（必填）。
         - add_tags: 需要新增的印象标签列表。例如 ["爱玩原神", "很幽默"]。
         - remove_tags: 需要移除的旧标签列表（用于修正印象或删除错误的标签）。例如 ["内向"]。
@@ -928,7 +874,10 @@ async def get_user_relation_context(db_session, user_id: str, user_name: str | N
 策略：保持礼貌，通过对话了解对方。
 """
         if relation.state in {"broken", "distressed"}:
-            strategy = "策略：你非常讨厌他，但如果他**诚恳道歉**或**做出实质性补偿**，请给他一个改过自新的机会（给予大幅好感度加分），不要一直死咬着不放。"
+            strategy = (
+                "策略：你非常讨厌他，但如果他**诚恳道歉**或**做出实质性补偿**，"
+                "请给他一个改过自新的机会（给予大幅好感度加分），不要一直死咬着不放。"
+            )
         elif relation.state in {"enamored", "love"}:
             strategy = "策略：你们关系极好，但不要对他无底线纵容。"
         else:
@@ -944,8 +893,10 @@ async def get_user_relation_context(db_session, user_id: str, user_name: str | N
 【画像维护指南】
 1. 如果对方的表现符合现有标签，无需操作。
 2. 如果对方表现出了**新特征**，放入 add_tags。
-3. 如果对方的表现与**旧标签冲突**（例如以前标签是'内向'，今天他突然'话痨'），请将'内向'放入 remove_tags，并将'话痨'放入 add_tags。
-4. **关于好感度评分**：请基于**本次对话内容质量**给出 `score_change`（这是 raw 意图变化，不是最终变化）。常规用小幅分值（如 -20~+20），只有极端事件才给到 ±50。即使当前关系很差，只要这次表现好，也应给正向分。
+3. 如果对方的表现与**旧标签冲突**（例如以前标签是'内向'，今天他突然'话痨'），
+   请将'内向'放入 remove_tags，并将'话痨'放入 add_tags。
+4. **关于好感度评分**：请基于**本次对话内容质量**给出 `score_change`（这是 raw 意图变化，不是最终变化）。
+   常规用小幅分值（如 -20~+20），只有极端事件才给到 ±50。即使当前关系很差，只要这次表现好，也应给正向分。
 {strategy}
 """
     except Exception as e:
@@ -1232,6 +1183,7 @@ async def create_chat_agent(
         cross_user_direct_instruction = """- 本轮是多用户逐条直接回复，不存在单一“当前用户”
 - 不要调用年度报告、画像更新、禁言自己这类绑定单个用户身份的工具
 - 需要发文本时，只调用一次 `reply_user`，每个目标一行，按提示编号顺序回复
+- 本模式下每行会发送给对应目标；不要用 /n 分隔目标
 """
 
     optional_ctx = OptionalToolContext(
@@ -1329,7 +1281,8 @@ async def create_chat_agent(
 【风格】
 - 像真实群友，口语化、简短自然
 - 优先短句；默认只调用一次 `reply_user`
-- 遇到简单的问题，优先只发送一条短消息进行回复；如果遇到了复杂的问题，可以把一个复杂的问题拆成连续发 2-3 条短消息，如果你这么做，请在同一次 `reply_user` 的 content 中用换行分隔，每行一个重点
+- 遇到简单的问题，优先只发送一条短消息进行回复；普通换行只用于同一条消息内部排版
+- 如果复杂问题确实需要连续发 2-3 条短消息，请在同一次 `reply_user` 的 content 中用单独一行 `/n` 分隔每条消息
 - 不要为了拆句多次调用 `reply_user`
 - 多条回复必须信息递进，后一条必须提供新信息，禁止同义改写重复
 - 如果下一条和上一条语义高度重叠，直接不发下一条
@@ -1385,6 +1338,7 @@ async def create_chat_agent(
                 bot_id,
                 allow_reply_duplicates=is_multi_direct_reply,
                 check_recent_duplicate=False,
+                split_on_newline=True,
             ),
             search_meme_tool,
             similar_meme_tool,
@@ -1402,6 +1356,7 @@ async def create_chat_agent(
                 bot_id,
                 allow_reply_duplicates=is_multi_direct_reply,
                 check_recent_duplicate=not has_direct_targets,
+                split_on_newline=is_multi_direct_reply,
             ),
             search_meme_tool,
             similar_meme_tool,
@@ -1419,6 +1374,7 @@ async def create_chat_agent(
                 bot_id,
                 allow_reply_duplicates=is_multi_direct_reply,
                 check_recent_duplicate=not has_direct_targets,
+                split_on_newline=is_multi_direct_reply,
             ),
             search_meme_tool,
             similar_meme_tool,
@@ -1664,7 +1620,10 @@ async def format_chat_history(
         parts: list[dict[str, Any]] = [
             {
                 "type": "text",
-                "text": "【当前重点图片】以下图片与本轮问题直接相关，优先分析这些图片，不要把其他历史图片当成当前问题对象。",
+                "text": (
+                    "【当前重点图片】以下图片与本轮问题直接相关，"
+                    "优先分析这些图片，不要把其他历史图片当成当前问题对象。"
+                ),
             }
         ]
         for idx, image in enumerate(bound_images, 1):

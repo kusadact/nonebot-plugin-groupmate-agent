@@ -65,4 +65,19 @@ def test_usage_config_cost_estimation_matches_defaults():
         config=cfg,
     )
 
-    assert cost == pytest.approx(0.0248)
+    assert cost == pytest.approx(0.0244)
+
+
+def test_usage_config_cost_estimation_charges_cache_creation_separately():
+    cfg = config.ScopedConfig()
+
+    cost = usage.estimate_cost_from_config(
+        prompt_tokens=10000,
+        completion_tokens=1000,
+        cached_tokens=2000,
+        cache_creation_tokens=1000,
+        callback_cost=0.0,
+        config=cfg,
+    )
+
+    assert cost == pytest.approx(0.0249)

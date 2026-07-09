@@ -18,6 +18,7 @@ from sqlalchemy import Select
 from nonebot_plugin_groupmate_agent.model import ChatHistory, ChatHistorySchema
 from nonebot_plugin_groupmate_agent.reply_guard import is_request_active
 
+from ..prompt_cache import add_ephemeral_cache_marker, should_use_explicit_prompt_cache
 from .types import OptionalToolBundle, OptionalToolContext, ToolLimitSpec
 
 SCHEDULED_AGENT_HISTORY_LIMIT = 20
@@ -277,7 +278,9 @@ async def _run_scheduled_agent_task(
 ) -> None:
     try:
         from nonebot_plugin_groupmate_agent.agent import create_chat_agent, format_chat_history, make_agent_state
+        from nonebot_plugin_groupmate_agent.config import Config
 
+        plugin_config = get_plugin_config(Config).groupmate_agent
         async with get_session() as db_session:
             rows = (
                 (
@@ -330,6 +333,8 @@ async def _run_scheduled_agent_task(
                 max_inline_images=0,
                 omit_images=True,
             )
+            if should_use_explicit_prompt_cache(plugin_config):
+                history_messages = add_ephemeral_cache_marker(history_messages)
             final_messages = list(context_messages) + list(history_messages) + [HumanMessage(content=prompt)]
             await graph.ainvoke(make_agent_state(final_messages, session_id, None))
             await db_session.commit()

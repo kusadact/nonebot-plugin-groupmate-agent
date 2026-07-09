@@ -49,6 +49,7 @@ from .optional_tools import (
 )
 from .optional_tools.emoji_like import extract_emoji_like_message_id_text
 from .optional_tools.moderation import PERMISSION_STATUS
+from .prompt_cache import add_ephemeral_cache_marker, build_system_messages, should_use_explicit_prompt_cache
 
 __all__ = [
     "AgentToolBundle",
@@ -71,6 +72,10 @@ with open(Path(__file__).parent.parent / "stop_words.txt", encoding="utf-8") as 
 
 _detached_tasks: set[asyncio.Task[Any]] = set()
 _DETACHED_SENT_CLEANUP_DELAY_SECONDS = 600.0
+
+
+def _use_explicit_prompt_cache() -> bool:
+    return should_use_explicit_prompt_cache(plugin_config)
 
 
 async def _finish_db_operation(coro):
@@ -118,16 +123,18 @@ async def _record_graph_token_usage(
     prompt_tokens = _as_non_negative_int(graph_result.get("llm_prompt_tokens"))
     completion_tokens = _as_non_negative_int(graph_result.get("llm_completion_tokens"))
     cached_tokens = _as_non_negative_int(graph_result.get("llm_cached_tokens"))
+    cache_creation_tokens = _as_non_negative_int(graph_result.get("llm_cache_creation_tokens"))
     total_tokens = _as_non_negative_int(graph_result.get("llm_total_tokens"))
     if total_tokens <= 0:
         total_tokens = prompt_tokens + completion_tokens
-    if max(prompt_tokens, completion_tokens, cached_tokens, total_tokens) <= 0:
+    if max(prompt_tokens, completion_tokens, cached_tokens, cache_creation_tokens, total_tokens) <= 0:
         return
 
     estimated_cost = estimate_cost_from_config(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         cached_tokens=cached_tokens,
+        cache_creation_tokens=cache_creation_tokens,
         callback_cost=0.0,
         config=plugin_config,
     )
@@ -142,6 +149,7 @@ async def _record_graph_token_usage(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         cached_tokens=cached_tokens,
+        cache_creation_tokens=cache_creation_tokens,
         total_tokens=total_tokens,
         estimated_cost=estimated_cost,
     )
@@ -1471,10 +1479,11 @@ async def create_chat_agent(
         for spec in bundle.tool_limits:
             tool_limits.append(GraphToolLimit(tool_name=spec.tool_name, run_limit=spec.run_limit))
 
-    system_messages = [
-        SystemMessage(content=stable_system_prompt),
-        SystemMessage(content=tool_mode_prompt),
-    ]
+    system_messages = build_system_messages(
+        stable_system_prompt,
+        tool_mode_prompt,
+        use_cache_control=_use_explicit_prompt_cache(),
+    )
     graph = build_chat_graph(model, tools, system_messages, tool_limits=tool_limits)
     context_messages: list[BaseMessage] = []
     if context_prompt.strip():
@@ -1869,6 +1878,8 @@ async def choice_response_strategy(
 如果不需要回复，请保持沉默。
 """
 
+        if _use_explicit_prompt_cache():
+            chat_history_messages = add_ephemeral_cache_marker(chat_history_messages)
         final_messages = context_messages + chat_history_messages + [HumanMessage(content=prompt_text)]
         invoke_state = make_agent_state(final_messages, session_id, request_id)
         graph_result: dict[str, Any] | None = None
@@ -1896,6 +1907,8 @@ async def choice_response_strategy(
                     if str(target.get("message_id") or "").strip()
                 },
             )
+            if _use_explicit_prompt_cache():
+                text_only_messages = add_ephemeral_cache_marker(text_only_messages)
             text_only_prompt = prompt_text.replace(
                 "只有当前用户明确询问图片内容、回复/引用图片、要求找图/发图，或上下文确实在讨论这张图时，才重点结合图片内容回答。",
                 "如果本轮图片已因内容审核被省略，只能结合文字、图片摘要或引用文字回答，不要臆测图片细节。",

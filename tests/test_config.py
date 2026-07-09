@@ -34,7 +34,12 @@ def test_usage_webui_defaults_are_conservative():
     assert cfg.chat_input_cost_per_million == 2.0
     assert cfg.chat_output_cost_per_million == 8.0
     assert cfg.chat_cached_input_cost_per_million == 0.4
+    assert cfg.chat_explicit_cached_input_cost_per_million == 0.2
+    assert cfg.chat_cache_creation_input_cost_per_million == 2.5
+    assert cfg.chat_explicit_prompt_cache is True
     assert cfg.chat_long_context_threshold_tokens == 256000
+    assert cfg.chat_long_explicit_cached_input_cost_per_million == 0.6
+    assert cfg.chat_long_cache_creation_input_cost_per_million == 7.5
 
 
 def test_summary_key_falls_back_in_priority_order():

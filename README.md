@@ -106,10 +106,15 @@ plugins = ["nonebot_plugin_groupmate_agent"]
 | `groupmate_agent__chat_input_cost_per_million` | `2.0` | 主对话输入 token 百万单价估算 |
 | `groupmate_agent__chat_output_cost_per_million` | `8.0` | 主对话输出 token 百万单价估算 |
 | `groupmate_agent__chat_cached_input_cost_per_million` | `0.4` | 主对话缓存命中输入 token 百万单价估算 |
+| `groupmate_agent__chat_explicit_cached_input_cost_per_million` | `0.2` | 显式 prompt cache 命中输入 token 百万单价估算 |
+| `groupmate_agent__chat_cache_creation_input_cost_per_million` | `2.5` | 显式 prompt cache 创建输入 token 百万单价估算 |
+| `groupmate_agent__chat_explicit_prompt_cache` | `true` | 对支持的主对话接口启用显式 prompt cache 标记 |
 | `groupmate_agent__chat_long_context_threshold_tokens` | `256000` | 长上下文计费阈值 |
 | `groupmate_agent__chat_long_input_cost_per_million` | `6.0` | 长上下文输入 token 百万单价估算 |
 | `groupmate_agent__chat_long_output_cost_per_million` | `24.0` | 长上下文输出 token 百万单价估算 |
 | `groupmate_agent__chat_long_cached_input_cost_per_million` | `1.2` | 长上下文缓存命中输入 token 百万单价估算 |
+| `groupmate_agent__chat_long_explicit_cached_input_cost_per_million` | `0.6` | 长上下文显式 prompt cache 命中输入 token 百万单价估算 |
+| `groupmate_agent__chat_long_cache_creation_input_cost_per_million` | `7.5` | 长上下文显式 prompt cache 创建输入 token 百万单价估算 |
 | `groupmate_agent__summary_base_url` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | 总结模型 base URL |
 | `groupmate_agent__summary_model` | `qwen-flash` | 群体认知档案总结模型 |
 | `groupmate_agent__summary_api_key` | 空 | 总结模型 API Key |

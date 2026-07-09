@@ -28,7 +28,7 @@ def test_llm_usage_parser_reads_usage_metadata_cache_details():
             "input_tokens": 100,
             "output_tokens": 20,
             "total_tokens": 120,
-            "input_token_details": {"cache_read": 30},
+            "input_token_details": {"cache_read": 30, "cache_creation": 10},
         },
     )
     state = graph.make_agent_state([], "group-1", "req-1")
@@ -39,6 +39,7 @@ def test_llm_usage_parser_reads_usage_metadata_cache_details():
         "prompt_tokens": 100,
         "completion_tokens": 20,
         "cached_tokens": 30,
+        "cache_creation_tokens": 10,
         "total_tokens": 120,
     }
 
@@ -51,7 +52,7 @@ def test_llm_usage_parser_reads_response_metadata_token_usage():
                 "prompt_tokens": 40,
                 "completion_tokens": 6,
                 "total_tokens": 46,
-                "prompt_tokens_details": {"cached_tokens": 12},
+                "prompt_tokens_details": {"cached_tokens": 12, "cache_creation_input_tokens": 4},
             }
         },
     )
@@ -63,6 +64,7 @@ def test_llm_usage_parser_reads_response_metadata_token_usage():
         "prompt_tokens": 40,
         "completion_tokens": 6,
         "cached_tokens": 12,
+        "cache_creation_tokens": 4,
         "total_tokens": 46,
     }
 
@@ -87,5 +89,6 @@ def test_llm_usage_parser_reads_raw_usage_metadata():
         "prompt_tokens": 70,
         "completion_tokens": 8,
         "cached_tokens": 20,
+        "cache_creation_tokens": 0,
         "total_tokens": 78,
     }

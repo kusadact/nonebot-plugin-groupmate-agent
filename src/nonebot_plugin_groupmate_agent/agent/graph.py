@@ -27,6 +27,7 @@ class AgentState(TypedDict):
     llm_prompt_tokens: int
     llm_completion_tokens: int
     llm_cached_tokens: int
+    llm_cache_creation_tokens: int
     llm_total_tokens: int
 
 
@@ -57,6 +58,7 @@ def make_agent_state(
         "llm_prompt_tokens": 0,
         "llm_completion_tokens": 0,
         "llm_cached_tokens": 0,
+        "llm_cache_creation_tokens": 0,
         "llm_total_tokens": 0,
     }
 
@@ -197,24 +199,41 @@ def _log_llm_token_usage(response: AIMessage, state: AgentState) -> dict[str, in
         _nested_value(raw_usage, "input_token_details", "cache_read"),
         _nested_value(raw_usage, "input_token_details", "cached_tokens"),
     )
-    cache_write_tokens = _first_int(
+    cache_creation_tokens = _first_int(
         input_token_details.get("cache_creation"),
         input_token_details.get("cache_creation_input_tokens"),
+        input_token_details.get("cache_write_input_tokens"),
         prompt_token_details.get("cache_creation_tokens"),
         prompt_token_details.get("cache_creation_input_tokens"),
+        prompt_token_details.get("cache_write_input_tokens"),
         raw_prompt_token_details.get("cache_creation_tokens"),
         raw_prompt_token_details.get("cache_creation_input_tokens"),
+        raw_prompt_token_details.get("cache_write_input_tokens"),
         token_usage.get("cache_creation_input_tokens"),
+        token_usage.get("cache_write_input_tokens"),
         raw_usage.get("cache_creation_input_tokens"),
+        raw_usage.get("cache_write_input_tokens"),
         _nested_value(token_usage, "input_token_details", "cache_creation"),
+        _nested_value(token_usage, "input_token_details", "cache_creation_input_tokens"),
+        _nested_value(token_usage, "input_token_details", "cache_write_input_tokens"),
+        _nested_value(token_usage, "input_tokens_details", "cache_creation_input_tokens"),
+        _nested_value(token_usage, "input_tokens_details", "cache_write_input_tokens"),
         _nested_value(raw_usage, "input_token_details", "cache_creation"),
+        _nested_value(raw_usage, "input_token_details", "cache_creation_input_tokens"),
+        _nested_value(raw_usage, "input_token_details", "cache_write_input_tokens"),
+        _nested_value(raw_usage, "input_tokens_details", "cache_creation_input_tokens"),
+        _nested_value(raw_usage, "input_tokens_details", "cache_write_input_tokens"),
     )
 
-    if all(value is None for value in (input_tokens, output_tokens, total_tokens, cached_tokens, cache_write_tokens)):
+    if all(
+        value is None
+        for value in (input_tokens, output_tokens, total_tokens, cached_tokens, cache_creation_tokens)
+    ):
         return {
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "cached_tokens": 0,
+            "cache_creation_tokens": 0,
             "total_tokens": 0,
         }
 
@@ -229,7 +248,7 @@ def _log_llm_token_usage(response: AIMessage, state: AgentState) -> dict[str, in
         f"output={_format_token_count(output_tokens)} "
         f"total={_format_token_count(total_tokens)} "
         f"cached={_format_token_count(cached_tokens)} "
-        f"cache_write={_format_token_count(cache_write_tokens)} "
+        f"cache_creation={_format_token_count(cache_creation_tokens)} "
         f"cache_hit={cache_hit}"
     )
     prompt_count = input_tokens or 0
@@ -238,6 +257,7 @@ def _log_llm_token_usage(response: AIMessage, state: AgentState) -> dict[str, in
         "prompt_tokens": prompt_count,
         "completion_tokens": completion_count,
         "cached_tokens": cached_tokens or 0,
+        "cache_creation_tokens": cache_creation_tokens or 0,
         "total_tokens": total_tokens if total_tokens is not None else prompt_count + completion_count,
     }
 
@@ -257,6 +277,8 @@ def _make_agent_node(model: Any, tools: list[BaseTool], system_messages: Sequenc
             "llm_prompt_tokens": state.get("llm_prompt_tokens", 0) + usage["prompt_tokens"],
             "llm_completion_tokens": state.get("llm_completion_tokens", 0) + usage["completion_tokens"],
             "llm_cached_tokens": state.get("llm_cached_tokens", 0) + usage["cached_tokens"],
+            "llm_cache_creation_tokens": state.get("llm_cache_creation_tokens", 0)
+            + usage["cache_creation_tokens"],
             "llm_total_tokens": state.get("llm_total_tokens", 0) + usage["total_tokens"],
         }
 

@@ -28,14 +28,17 @@ def estimate_cost(
     prompt_tokens: int,
     completion_tokens: int,
     cached_tokens: int,
+    cache_creation_tokens: int = 0,
     callback_cost: float,
     input_cost_per_million: float,
     output_cost_per_million: float,
     cached_input_cost_per_million: float,
+    cache_creation_input_cost_per_million: float | None = None,
     long_context_threshold_tokens: int = 256000,
     long_input_cost_per_million: float | None = None,
     long_output_cost_per_million: float | None = None,
     long_cached_input_cost_per_million: float | None = None,
+    long_cache_creation_input_cost_per_million: float | None = None,
 ) -> float:
     if callback_cost > 0:
         return float(callback_cost)
@@ -56,11 +59,22 @@ def estimate_cost(
             if long_cached_input_cost_per_million is not None
             else cached_input_cost_per_million
         )
+        cache_creation_input_cost_per_million = (
+            long_cache_creation_input_cost_per_million
+            if long_cache_creation_input_cost_per_million is not None
+            else cache_creation_input_cost_per_million
+        )
 
-    billed_prompt_tokens = max(prompt_tokens - cached_tokens, 0)
+    cache_creation_input_cost_per_million = (
+        cache_creation_input_cost_per_million
+        if cache_creation_input_cost_per_million is not None
+        else input_cost_per_million
+    )
+    billed_prompt_tokens = max(prompt_tokens - cached_tokens - cache_creation_tokens, 0)
     return (
         billed_prompt_tokens / 1_000_000 * input_cost_per_million
         + cached_tokens / 1_000_000 * cached_input_cost_per_million
+        + cache_creation_tokens / 1_000_000 * cache_creation_input_cost_per_million
         + completion_tokens / 1_000_000 * output_cost_per_million
     )
 
@@ -70,21 +84,35 @@ def estimate_cost_from_config(
     prompt_tokens: int,
     completion_tokens: int,
     cached_tokens: int,
+    cache_creation_tokens: int = 0,
     callback_cost: float,
     config: ScopedConfig,
 ) -> float:
+    cached_input_cost = (
+        config.chat_explicit_cached_input_cost_per_million
+        if config.chat_explicit_prompt_cache
+        else config.chat_cached_input_cost_per_million
+    )
+    long_cached_input_cost = (
+        config.chat_long_explicit_cached_input_cost_per_million
+        if config.chat_explicit_prompt_cache
+        else config.chat_long_cached_input_cost_per_million
+    )
     return estimate_cost(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         cached_tokens=cached_tokens,
+        cache_creation_tokens=cache_creation_tokens,
         callback_cost=callback_cost,
         input_cost_per_million=config.chat_input_cost_per_million,
         output_cost_per_million=config.chat_output_cost_per_million,
-        cached_input_cost_per_million=config.chat_cached_input_cost_per_million,
+        cached_input_cost_per_million=cached_input_cost,
+        cache_creation_input_cost_per_million=config.chat_cache_creation_input_cost_per_million,
         long_context_threshold_tokens=config.chat_long_context_threshold_tokens,
         long_input_cost_per_million=config.chat_long_input_cost_per_million,
         long_output_cost_per_million=config.chat_long_output_cost_per_million,
-        long_cached_input_cost_per_million=config.chat_long_cached_input_cost_per_million,
+        long_cached_input_cost_per_million=long_cached_input_cost,
+        long_cache_creation_input_cost_per_million=config.chat_long_cache_creation_input_cost_per_million,
     )
 
 
@@ -100,10 +128,11 @@ async def record_token_usage(
     prompt_tokens: int,
     completion_tokens: int,
     cached_tokens: int,
+    cache_creation_tokens: int,
     total_tokens: int,
     estimated_cost: float,
 ) -> None:
-    if max(prompt_tokens, completion_tokens, cached_tokens, total_tokens) <= 0:
+    if max(prompt_tokens, completion_tokens, cached_tokens, cache_creation_tokens, total_tokens) <= 0:
         return
 
     db_session.add(
@@ -117,6 +146,7 @@ async def record_token_usage(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             cached_tokens=cached_tokens,
+            cache_creation_tokens=cache_creation_tokens,
             total_tokens=total_tokens,
             estimated_cost=estimated_cost,
         )
@@ -135,6 +165,7 @@ def estimate_usage_row_cost(row: TokenUsage, config: ScopedConfig) -> float:
         prompt_tokens=row.prompt_tokens,
         completion_tokens=row.completion_tokens,
         cached_tokens=row.cached_tokens,
+        cache_creation_tokens=_as_int(getattr(row, "cache_creation_tokens", 0)),
         callback_cost=0.0,
         config=config,
     )
@@ -147,6 +178,7 @@ def _empty_metrics(labels: dict[str, Any]) -> dict[str, Any]:
         "prompt_tokens": 0,
         "completion_tokens": 0,
         "cached_tokens": 0,
+        "cache_creation_tokens": 0,
         "total_tokens": 0,
         "estimated_cost": 0.0,
     }
@@ -166,6 +198,7 @@ def _aggregate_rows(
         item["prompt_tokens"] += _as_int(row.prompt_tokens)
         item["completion_tokens"] += _as_int(row.completion_tokens)
         item["cached_tokens"] += _as_int(row.cached_tokens)
+        item["cache_creation_tokens"] += _as_int(getattr(row, "cache_creation_tokens", 0))
         item["total_tokens"] += _as_int(row.total_tokens)
         item["estimated_cost"] += cost_fn(row)
     return sorted(grouped.values(), key=lambda item: item["total_tokens"], reverse=True)
@@ -201,6 +234,7 @@ async def get_usage_dashboard_data(
         "prompt_tokens": sum(_as_int(row.prompt_tokens) for row in rows),
         "completion_tokens": sum(_as_int(row.completion_tokens) for row in rows),
         "cached_tokens": sum(_as_int(row.cached_tokens) for row in rows),
+        "cache_creation_tokens": sum(_as_int(getattr(row, "cache_creation_tokens", 0)) for row in rows),
         "total_tokens": sum(_as_int(row.total_tokens) for row in rows),
         "estimated_cost": sum(cost_fn(row) for row in rows),
     }
@@ -246,6 +280,7 @@ async def get_usage_dashboard_data(
                 "prompt_tokens": row.prompt_tokens,
                 "completion_tokens": row.completion_tokens,
                 "cached_tokens": row.cached_tokens,
+                "cache_creation_tokens": _as_int(getattr(row, "cache_creation_tokens", 0)),
                 "total_tokens": row.total_tokens,
                 "estimated_cost": cost_fn(row),
             }

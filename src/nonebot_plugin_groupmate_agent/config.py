@@ -24,6 +24,8 @@ class ScopedConfig(BaseModel):
     model: str = DASHSCOPE_CHAT_MODEL
     bot_name: str = "bot"
     reply_probability: float = 0.01
+    continuous_conversation_minutes: float = 5.0
+    proactive_private_message: bool = False
     personality_setting: str = ""
     qdrant_uri: str = ""
     qdrant_api_key: str = ""

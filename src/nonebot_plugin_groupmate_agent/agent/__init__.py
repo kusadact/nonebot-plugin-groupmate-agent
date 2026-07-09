@@ -72,6 +72,27 @@ _detached_tasks: set[asyncio.Task[Any]] = set()
 _DETACHED_SENT_CLEANUP_DELAY_SECONDS = 600.0
 
 
+async def _finish_db_operation(coro):
+    task = asyncio.create_task(coro)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await task
+        except Exception:
+            logger.exception("取消期间数据库事务收尾失败")
+        raise
+
+
+async def _safe_rollback(db_session) -> None:
+    try:
+        await _finish_db_operation(db_session.rollback())
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("数据库回滚失败")
+
+
 @dataclass
 class Context:
     session_id: str
@@ -1284,10 +1305,11 @@ async def create_chat_agent(
 - 遇到简单的问题，优先只发送一条短消息进行回复；普通换行只用于同一条消息内部排版
 - 如果复杂问题确实需要连续发 2-3 条短消息，请在同一次 `reply_user` 的 content 中用单独一行 `/n` 分隔每条消息
 - 不要为了拆句多次调用 `reply_user`
-- 多条回复必须信息递进，后一条必须提供新信息，禁止同义改写重复
-- 如果下一条和上一条语义高度重叠，直接不发下一条
+- 多条回复必须信息递进，后一条必须提供新信息；不要重复 bot 自己刚发过的话
+- 如果下一条与 bot 上一条语义高度重叠，直接不发下一条
 - 但当本轮提示要求“逐条回复多条消息”时，每一行对应不同消息，不要因为两行语义相近而漏回
 - 可吐槽可玩梗，但不恶意攻击，不无脑迎合
+- 群友在质疑、反问、跟风或刷同一句时，通常不要纠正这种行为；可以短句接梗、复读关键词、跟一句队形，或者保持沉默
 - 不要复读模板句，不要输出“我脑子一片空白”“我被修坏了”“我不知道我是谁”这类台词
 - 不要使用 emoji，尤其不要用 😅
 - 不要使用 Markdown
@@ -1302,7 +1324,9 @@ async def create_chat_agent(
 【边界】
 - 不要插入他人的对话
 - 不要直呼“管理员”“群主”职位名，尽量用昵称
-- 不要发送重复或高度相似内容
+- 不要重复 bot 自己刚发过的内容；但可以偶尔复读群友的短句、关键词或队形来参与群聊
+- 不要把群友的质疑、反问、复读当成需要批评的行为，除非已经变成恶意攻击或严重刷屏
+- 图片/表情包默认只是群聊氛围；除非用户明确询问图片、引用图片或要求处理图片，不要主动解读图片含义
 - 遇到明显危险、违法、过分要求：简短拒绝、吐槽或无视（如“？”）
 
 【RAG 检索硬约束】
@@ -1783,7 +1807,9 @@ async def choice_response_strategy(
 【任务】
 请根据上述对话历史，判断是否需要回复。如果需要，请调用相应工具。
 {reply_scope_instruction}
-如果是针对图片的消息，请结合图片内容回答。
+普通图片/表情包通常只是群聊氛围，不要主动解读、复述或围绕它展开回复。
+只有当前用户明确询问图片内容、回复/引用图片、要求找图/发图，或上下文确实在讨论这张图时，才重点结合图片内容回答。
+群友在质疑、反问、跟风或复读时，不要优先质疑这种行为本身；可以自然接一句、复读关键词、跟队形，或者保持沉默。
 如果上文包含“【本轮回复引用的消息】”，优先结合这些被回复的文本或图片消息回答。
 如果上文包含“【当前重点图片】”，优先围绕这些图片回答。
 如果不需要回复，请保持沉默。
@@ -1816,8 +1842,8 @@ async def choice_response_strategy(
                 },
             )
             text_only_prompt = prompt_text.replace(
-                "如果是针对图片的消息，请结合图片内容回答。",
-                "如果是针对图片的消息，本轮图片已因内容审核被省略，只能结合文字、图片摘要或引用文字回答。",
+                "只有当前用户明确询问图片内容、回复/引用图片、要求找图/发图，或上下文确实在讨论这张图时，才重点结合图片内容回答。",
+                "如果本轮图片已因内容审核被省略，只能结合文字、图片摘要或引用文字回答，不要臆测图片细节。",
             ).replace(
                 "如果上文包含“【当前重点图片】”，优先围绕这些图片回答。",
                 "如果原消息包含图片但当前没有图片内容，请不要臆测图片细节。",
@@ -1826,9 +1852,10 @@ async def choice_response_strategy(
                 "messages": context_messages + text_only_messages + [HumanMessage(content=text_only_prompt)]
             }
             await graph.ainvoke(make_agent_state(text_only_input["messages"], session_id, request_id))
-        await db_session.commit()
+        await _finish_db_operation(db_session.commit())
         return ResponseMessage(need_reply=False, text=None)
 
     except Exception:
         logger.exception("Agent 决策过程发生异常")
+        await _safe_rollback(db_session)
         return ResponseMessage(need_reply=False, text=None)

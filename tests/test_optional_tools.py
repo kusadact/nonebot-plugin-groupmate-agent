@@ -19,6 +19,7 @@ STUB_TOOL_MODULE_NAMES = (
     "calculator",
     "emoji_like",
     "moderation",
+    "private_message",
     "qq_avatar",
     "qq_avatar_describer",
     "scheduled_tasks",

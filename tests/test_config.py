@@ -18,6 +18,13 @@ def test_chat_settings_prefer_openai_compat_values():
     assert cfg.chat_api_key == "openai-key"
 
 
+def test_interaction_defaults_are_conservative():
+    cfg = config.ScopedConfig()
+
+    assert cfg.continuous_conversation_minutes == 5.0
+    assert cfg.proactive_private_message is False
+
+
 def test_summary_key_falls_back_in_priority_order():
     cfg = config.ScopedConfig(qwen_key=" qwen-key ", openai_token=" openai-key ")
     assert cfg.summary_api_key_resolved == "qwen-key"

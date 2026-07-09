@@ -87,6 +87,8 @@ with open(Path(__file__).parent / "stop_words.txt", encoding="utf-8") as f:
     stop_words = f.read().splitlines() + ["id", "回复"]
 
 _MAX_NORMAL_REPLY_QUEUE_SIZE = 1
+MAX_WORDCLOUD_DAYS = 3650
+_COMMAND_PREFIXES = ("!", "！", "/", "#", "?", "\\")
 
 
 class PermanentMultimodalError(Exception):
@@ -129,6 +131,7 @@ class ReplyRequest:
     user_id: str
     user_name: str | None
     is_tome: bool
+    is_continuous: bool
     is_direct: bool
     bound_messages: list[dict[str, str]]
     bound_images: list[dict[str, str]]
@@ -151,6 +154,33 @@ _group_reply_state_lock = asyncio.Lock()
 _direct_reply_tasks: set[asyncio.Task[Any]] = set()
 # Mutated only by synchronous helpers with no await points, so no asyncio lock is needed here.
 _recent_forward_messages = RecentForwardMessageStore()
+_continuous_conversation_until: dict[tuple[str, str], datetime.datetime] = {}
+
+
+def _continuous_conversation_ttl() -> datetime.timedelta:
+    minutes = max(float(plugin_config.continuous_conversation_minutes or 0), 0)
+    return datetime.timedelta(minutes=minutes)
+
+
+def _is_continuous_conversation(session_id: str, user_id: str) -> bool:
+    expires_at = _continuous_conversation_until.get((session_id, user_id))
+    if expires_at is None:
+        return False
+    if datetime.datetime.now() > expires_at:
+        _continuous_conversation_until.pop((session_id, user_id), None)
+        return False
+    return True
+
+
+def _refresh_continuous_conversation(session_id: str, user_id: str) -> None:
+    ttl = _continuous_conversation_ttl()
+    if ttl <= datetime.timedelta(0):
+        return
+    _continuous_conversation_until[(session_id, user_id)] = datetime.datetime.now() + ttl
+
+
+def _is_command_like_text(text: str) -> bool:
+    return text.strip().startswith(_COMMAND_PREFIXES)
 
 
 def _build_direct_reply_context(
@@ -208,6 +238,7 @@ async def _execute_reply_request(group_id: str, request: ReplyRequest) -> None:
                 request.user_id,
                 request.user_name,
                 request.is_tome,
+                request.is_continuous,
                 request.bound_messages,
                 request.bound_images,
                 request.disable_inline_history_images,
@@ -1413,14 +1444,29 @@ async def handle_message(
     )
 
     if is_text:
-        chat_history = ChatHistory(
-            session_id=group_id,
-            user_id=session.user.id,
-            content_type="text",
-            content=content,
-            user_name=user_name,
-        )
-        db_session.add(chat_history)
+        do_insert = True
+        if body:
+            time_window = datetime.datetime.now() - datetime.timedelta(seconds=3)
+            existing = await db_session.execute(
+                Select(ChatHistory).where(
+                    ChatHistory.session_id == group_id,
+                    ChatHistory.user_id == session.user.id,
+                    ChatHistory.created_at >= time_window,
+                )
+            )
+            if any(history.content.endswith(body) for history in existing.scalars().all()):
+                logger.debug("消息已存在，跳过重复记录")
+                do_insert = False
+
+        if do_insert:
+            chat_history = ChatHistory(
+                session_id=group_id,
+                user_id=session.user.id,
+                content_type="text",
+                content=content,
+                user_name=user_name,
+            )
+            db_session.add(chat_history)
 
     try:
         await db_session.commit()
@@ -1460,6 +1506,7 @@ async def handle_message(
         return
 
     plain_event_text = event.get_plaintext() or ""
+    command_like = _is_command_like_text(plain_event_text) or _is_command_like_text(plain_text)
     bot_name_l = (plugin_config.bot_name or "").strip().lower()
     if bot_name_l and (
         plain_text.lower().startswith(bot_name_l)
@@ -1474,15 +1521,28 @@ async def handle_message(
         f"at_targets={at_targets} bot_name={plugin_config.bot_name!r} to_me={to_me}"
     )
 
-    should_reply = to_me or (random.random() < plugin_config.reply_probability)
+    explicit_to_me = to_me
+    continuous_to_me = (
+        not explicit_to_me
+        and not command_like
+        and bool(plain_text)
+        and session.scene.type == SceneType.GROUP
+        and _is_continuous_conversation(group_id, session.user.id)
+    )
+    if continuous_to_me:
+        logger.debug(f"群 {group_id} 用户 {session.user.id} 命中连续对话窗口")
+
+    should_reply = explicit_to_me or continuous_to_me or (random.random() < plugin_config.reply_probability)
     if not plain_event_text and not imgs:
         should_reply = False
-    if plain_event_text.startswith(("!", "！", "/", "#", "?", "\\")):
+    if command_like:
         should_reply = False
-    if not plain_event_text and not to_me:
+    if not plain_event_text and not (explicit_to_me or continuous_to_me):
         should_reply = False
+    if should_reply and (explicit_to_me or continuous_to_me):
+        _refresh_continuous_conversation(group_id, session.user.id)
 
-    if to_me:
+    if explicit_to_me or continuous_to_me:
         user_id = session.user.id
         user_name = session.user.name or session.user.nick
     else:
@@ -1532,7 +1592,8 @@ async def handle_message(
             bot_id=str(bot.self_id),
             user_id=user_id,
             user_name=user_name,
-            is_tome=to_me,
+            is_tome=explicit_to_me,
+            is_continuous=continuous_to_me,
             is_direct=is_direct,
             bound_messages=bound_messages,
             bound_images=bound_images,
@@ -1694,6 +1755,7 @@ async def handle_reply_logic(
     user_id: str,
     user_name: str | None,
     is_tome: bool,
+    is_continuous: bool,
     bound_messages: list[dict[str, str]] | None = None,
     bound_images: list[dict[str, str]] | None = None,
     disable_inline_history_images: bool = False,
@@ -1726,20 +1788,28 @@ async def handle_reply_logic(
         history_summary = ""
         for msg in recent_msgs:
             if msg.content_type == "image":
-                history_summary += f"{msg.user_name}: [发送了一张图片]\n"
+                history_summary += f"{msg.user_name}: [发送了一张图片/表情包，可能只是随手发的]\n"
             else:
                 history_summary += f"{msg.user_name}: {_clean_gate_text(msg.content)}\n"
 
         current_msg_text = (
             _clean_gate_text(recent_msgs[-1].content)
             if recent_msgs[-1].content_type == "text"
-            else "[图片]"
+            else "[图片/表情包。除非用户明确在问这张图、@bot、回复bot或正在延续图片话题，否则通常不需要回应]"
         )
+        gatekeeper_msg_text = current_msg_text
+        if is_continuous:
+            gatekeeper_msg_text = (
+                "这是用户在刚才主动呼叫 bot 后的连续对话消息。"
+                "如果像追问、补充、回应 bot 或继续话题，应倾向回复；"
+                "如果只是“嗯”“哈哈”“行”等无需回应的短反馈，可以不回复。\n"
+                f"{current_msg_text}"
+            )
 
         if not is_tome:
             should_reply = await check_if_should_reply(
                 history_summary,
-                current_msg_text,
+                gatekeeper_msg_text,
                 bot_name,
             )
             if not should_reply:
@@ -1836,6 +1906,8 @@ def _build_wordcloud_image(words: str) -> BytesIO:
 
 async def _collect_words_from_db(db_session, session_id: str, days: int = 1, user_id: str | None = None) -> str:
     """Query chat history and return a cleaned space-joined word string for wordcloud."""
+    if not 1 <= days <= MAX_WORDCLOUD_DAYS:
+        raise ValueError(f"统计范围应为 1-{MAX_WORDCLOUD_DAYS} 天")
     cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
     where = [ChatHistory.session_id == session_id, ChatHistory.content_type == "text", ChatHistory.created_at >= cutoff]
     if user_id:
@@ -1851,6 +1923,18 @@ async def _collect_words_from_db(db_session, session_id: str, days: int = 1, use
     return words
 
 
+def _parse_wordcloud_days(arg_text: str) -> int:
+    arg_text = arg_text.strip()
+    if not arg_text:
+        return 1
+    if not arg_text.isdigit():
+        raise ValueError("统计范围应为纯数字")
+    days = int(arg_text)
+    if not 1 <= days <= MAX_WORDCLOUD_DAYS:
+        raise ValueError(f"统计范围应为 1-{MAX_WORDCLOUD_DAYS} 天")
+    return days
+
+
 frequency = on_command("词频")
 
 
@@ -1860,11 +1944,10 @@ async def _(db_session: async_scoped_session, session: Uninfo, arg: Message = Co
         await frequency.finish("groupmate_agent disabled")
     session_id = session.scene.id
     arg_text = arg.extract_plain_text().strip()
-    if not arg_text:
-        arg_text = "1"
-    if not arg_text.isdigit():
-        await frequency.finish("统计范围应为纯数字")
-    days = int(arg_text)
+    try:
+        days = _parse_wordcloud_days(arg_text)
+    except ValueError as e:
+        await frequency.finish(str(e))
 
     words = await _collect_words_from_db(db_session, session_id, days=days, user_id=session.user.id)
     if not words:
@@ -1883,11 +1966,10 @@ async def _(db_session: async_scoped_session, session: Uninfo, arg: Message = Co
         await group_frequency.finish("groupmate_agent disabled")
     session_id = session.scene.id
     arg_text = arg.extract_plain_text().strip()
-    if not arg_text:
-        arg_text = "1"
-    if not arg_text.isdigit():
-        await group_frequency.finish("统计范围应为纯数字")
-    days = int(arg_text)
+    try:
+        days = _parse_wordcloud_days(arg_text)
+    except ValueError as e:
+        await group_frequency.finish(str(e))
 
     words = await _collect_words_from_db(db_session, session_id, days=days, user_id=None)
     # Even if no words, return an empty wordcloud (original group_frequency didn't check emptiness)

@@ -9,7 +9,16 @@ from typing import Any
 from nonebot import require
 from nonebot.log import logger
 
-from . import calculator, emoji_like, moderation, qq_avatar, qq_avatar_describer, scheduled_tasks, web_search
+from . import (
+    calculator,
+    emoji_like,
+    moderation,
+    private_message,
+    qq_avatar,
+    qq_avatar_describer,
+    scheduled_tasks,
+    web_search,
+)
 from .registry import (
     build_registered_agent_tool_bundles,
     inspect_registered_agent_tool_factory,
@@ -22,6 +31,7 @@ BUILTIN_TOOL_MODULES = [
     scheduled_tasks,
     emoji_like,
     moderation,
+    private_message,
     qq_avatar,
     qq_avatar_describer,
     calculator,

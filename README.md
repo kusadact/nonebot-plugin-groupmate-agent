@@ -100,6 +100,16 @@ plugins = ["nonebot_plugin_groupmate_agent"]
 | `groupmate_agent__openai_base_url` | 空 | 主对话模型 base URL，配置后优先于 `base_url` |
 | `groupmate_agent__openai_model` | 空 | 主对话模型名，配置后优先于 `model` |
 | `groupmate_agent__openai_token` | 空 | 主对话模型 API Key；配置后优先于 `qwen_key` |
+| `groupmate_agent__usage_webui_enabled` | `false` | 是否启用 Token 用量统计 WebUI |
+| `groupmate_agent__usage_webui_path` | `/groupmate-agent/usage` | Token 用量统计 WebUI 路径 |
+| `groupmate_agent__usage_webui_token` | 空 | Token 用量统计 WebUI 访问 token |
+| `groupmate_agent__chat_input_cost_per_million` | `2.0` | 主对话输入 token 百万单价估算 |
+| `groupmate_agent__chat_output_cost_per_million` | `8.0` | 主对话输出 token 百万单价估算 |
+| `groupmate_agent__chat_cached_input_cost_per_million` | `0.4` | 主对话缓存命中输入 token 百万单价估算 |
+| `groupmate_agent__chat_long_context_threshold_tokens` | `256000` | 长上下文计费阈值 |
+| `groupmate_agent__chat_long_input_cost_per_million` | `6.0` | 长上下文输入 token 百万单价估算 |
+| `groupmate_agent__chat_long_output_cost_per_million` | `24.0` | 长上下文输出 token 百万单价估算 |
+| `groupmate_agent__chat_long_cached_input_cost_per_million` | `1.2` | 长上下文缓存命中输入 token 百万单价估算 |
 | `groupmate_agent__summary_base_url` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | 总结模型 base URL |
 | `groupmate_agent__summary_model` | `qwen-flash` | 群体认知档案总结模型 |
 | `groupmate_agent__summary_api_key` | 空 | 总结模型 API Key |

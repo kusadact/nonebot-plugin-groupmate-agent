@@ -38,6 +38,7 @@ from ..reply_guard import (
     unregister_detached_task,
 )
 from ..reply_segments import normalize_reply_text, semantic_similarity, split_reply_segments
+from ..usage import estimate_cost_from_config, record_token_usage
 from .graph import GraphToolLimit, build_chat_graph, make_agent_state
 from .optional_tools import (
     AgentToolBundle,
@@ -91,6 +92,59 @@ async def _safe_rollback(db_session) -> None:
         raise
     except Exception:
         logger.exception("数据库回滚失败")
+
+
+def _as_non_negative_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int | float):
+        return max(int(value), 0)
+    return 0
+
+
+async def _record_graph_token_usage(
+    db_session,
+    *,
+    session_id: str,
+    request_id: str | None,
+    user_id: str,
+    user_name: str | None,
+    event: Event | None,
+    graph_result: dict[str, Any] | None,
+) -> None:
+    if not graph_result:
+        return
+
+    prompt_tokens = _as_non_negative_int(graph_result.get("llm_prompt_tokens"))
+    completion_tokens = _as_non_negative_int(graph_result.get("llm_completion_tokens"))
+    cached_tokens = _as_non_negative_int(graph_result.get("llm_cached_tokens"))
+    total_tokens = _as_non_negative_int(graph_result.get("llm_total_tokens"))
+    if total_tokens <= 0:
+        total_tokens = prompt_tokens + completion_tokens
+    if max(prompt_tokens, completion_tokens, cached_tokens, total_tokens) <= 0:
+        return
+
+    estimated_cost = estimate_cost_from_config(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cached_tokens=cached_tokens,
+        callback_cost=0.0,
+        config=plugin_config,
+    )
+    await record_token_usage(
+        db_session,
+        session_id=session_id,
+        session_type="private" if _is_private_event(event) else "group",
+        user_id=user_id,
+        user_name=user_name,
+        model=plugin_config.chat_model,
+        request_id=request_id,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cached_tokens=cached_tokens,
+        total_tokens=total_tokens,
+        estimated_cost=estimated_cost,
+    )
 
 
 @dataclass
@@ -1817,8 +1871,9 @@ async def choice_response_strategy(
 
         final_messages = context_messages + chat_history_messages + [HumanMessage(content=prompt_text)]
         invoke_state = make_agent_state(final_messages, session_id, request_id)
+        graph_result: dict[str, Any] | None = None
         try:
-            await graph.ainvoke(invoke_state)
+            graph_result = await graph.ainvoke(invoke_state)
         except Exception as e:
             if not _is_image_inspection_bad_request(e):
                 raise
@@ -1851,7 +1906,16 @@ async def choice_response_strategy(
             text_only_input: dict[str, Any] = {
                 "messages": context_messages + text_only_messages + [HumanMessage(content=text_only_prompt)]
             }
-            await graph.ainvoke(make_agent_state(text_only_input["messages"], session_id, request_id))
+            graph_result = await graph.ainvoke(make_agent_state(text_only_input["messages"], session_id, request_id))
+        await _record_graph_token_usage(
+            db_session,
+            session_id=session_id,
+            request_id=request_id,
+            user_id=user_id,
+            user_name=user_name,
+            event=event,
+            graph_result=graph_result,
+        )
         await _finish_db_operation(db_session.commit())
         return ResponseMessage(need_reply=False, text=None)
 

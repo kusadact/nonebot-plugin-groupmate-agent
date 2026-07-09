@@ -25,6 +25,18 @@ def test_interaction_defaults_are_conservative():
     assert cfg.proactive_private_message is False
 
 
+def test_usage_webui_defaults_are_conservative():
+    cfg = config.ScopedConfig()
+
+    assert cfg.usage_webui_enabled is False
+    assert cfg.usage_webui_path == "/groupmate-agent/usage"
+    assert cfg.usage_webui_token == ""
+    assert cfg.chat_input_cost_per_million == 2.0
+    assert cfg.chat_output_cost_per_million == 8.0
+    assert cfg.chat_cached_input_cost_per_million == 0.4
+    assert cfg.chat_long_context_threshold_tokens == 256000
+
+
 def test_summary_key_falls_back_in_priority_order():
     cfg = config.ScopedConfig(qwen_key=" qwen-key ", openai_token=" openai-key ")
     assert cfg.summary_api_key_resolved == "qwen-key"

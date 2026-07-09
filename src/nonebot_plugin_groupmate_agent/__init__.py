@@ -68,6 +68,7 @@ from .utils import (
     generate_file_hash,
     process_and_vectorize_session_chats,
 )
+from .webui import register_usage_webui
 
 __plugin_meta__ = PluginMetadata(
     name="nonebot-plugin-groupmate-agent",
@@ -83,6 +84,7 @@ plugin_data_dir: Path = store.get_plugin_data_dir()
 pic_dir = plugin_data_dir / "pics"
 pic_dir.mkdir(parents=True, exist_ok=True)
 plugin_config = get_plugin_config(Config).groupmate_agent
+register_usage_webui(plugin_config)
 with open(Path(__file__).parent / "stop_words.txt", encoding="utf-8") as f:
     stop_words = f.read().splitlines() + ["id", "回复"]
 

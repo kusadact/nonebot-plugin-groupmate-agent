@@ -24,6 +24,10 @@ class AgentState(TypedDict):
     tool_count: int
     tool_run_counts: dict[str, int]
     called_finish: int
+    llm_prompt_tokens: int
+    llm_completion_tokens: int
+    llm_cached_tokens: int
+    llm_total_tokens: int
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,10 @@ def make_agent_state(
         "tool_count": 0,
         "tool_run_counts": {},
         "called_finish": 0,
+        "llm_prompt_tokens": 0,
+        "llm_completion_tokens": 0,
+        "llm_cached_tokens": 0,
+        "llm_total_tokens": 0,
     }
 
 
@@ -146,7 +154,7 @@ def _format_token_count(value: int | None) -> str:
     return "-" if value is None else str(value)
 
 
-def _log_llm_token_usage(response: AIMessage, state: AgentState) -> None:
+def _log_llm_token_usage(response: AIMessage, state: AgentState) -> dict[str, int]:
     usage_metadata = _as_mapping(getattr(response, "usage_metadata", None))
     response_metadata = _as_mapping(getattr(response, "response_metadata", None))
     token_usage = _as_mapping(response_metadata.get("token_usage"))
@@ -159,12 +167,14 @@ def _log_llm_token_usage(response: AIMessage, state: AgentState) -> None:
         usage_metadata.get("input_tokens"),
         token_usage.get("prompt_tokens"),
         raw_usage.get("input_tokens"),
+        raw_usage.get("prompt_tokens"),
         response_metadata.get("input_tokens"),
     )
     output_tokens = _first_int(
         usage_metadata.get("output_tokens"),
         token_usage.get("completion_tokens"),
         raw_usage.get("output_tokens"),
+        raw_usage.get("completion_tokens"),
         response_metadata.get("output_tokens"),
     )
     total_tokens = _first_int(
@@ -201,7 +211,12 @@ def _log_llm_token_usage(response: AIMessage, state: AgentState) -> None:
     )
 
     if all(value is None for value in (input_tokens, output_tokens, total_tokens, cached_tokens, cache_write_tokens)):
-        return
+        return {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "cached_tokens": 0,
+            "total_tokens": 0,
+        }
 
     cache_hit = "-"
     if input_tokens and cached_tokens is not None:
@@ -217,6 +232,14 @@ def _log_llm_token_usage(response: AIMessage, state: AgentState) -> None:
         f"cache_write={_format_token_count(cache_write_tokens)} "
         f"cache_hit={cache_hit}"
     )
+    prompt_count = input_tokens or 0
+    completion_count = output_tokens or 0
+    return {
+        "prompt_tokens": prompt_count,
+        "completion_tokens": completion_count,
+        "cached_tokens": cached_tokens or 0,
+        "total_tokens": total_tokens if total_tokens is not None else prompt_count + completion_count,
+    }
 
 
 def _make_agent_node(model: Any, tools: list[BaseTool], system_messages: Sequence[BaseMessage]) -> Any:
@@ -227,8 +250,15 @@ def _make_agent_node(model: Any, tools: list[BaseTool], system_messages: Sequenc
         response: AIMessage = await bound_model.ainvoke([*normalized_system_messages, *state["messages"]])
         if not isinstance(response, AIMessage):
             response = AIMessage(content=str(getattr(response, "content", response)))
-        _log_llm_token_usage(response, state)
-        return {"messages": [response], "called_finish": 0}
+        usage = _log_llm_token_usage(response, state)
+        return {
+            "messages": [response],
+            "called_finish": 0,
+            "llm_prompt_tokens": state.get("llm_prompt_tokens", 0) + usage["prompt_tokens"],
+            "llm_completion_tokens": state.get("llm_completion_tokens", 0) + usage["completion_tokens"],
+            "llm_cached_tokens": state.get("llm_cached_tokens", 0) + usage["cached_tokens"],
+            "llm_total_tokens": state.get("llm_total_tokens", 0) + usage["total_tokens"],
+        }
 
     return agent_node
 

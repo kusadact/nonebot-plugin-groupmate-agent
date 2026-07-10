@@ -11,7 +11,10 @@ MAX_REPLY_MESSAGES = 3
 class ReplyItem(BaseModel):
     content: str = Field(
         min_length=1,
-        description="一条实际发送消息的正文；正文内部可以包含普通换行。",
+        description=(
+            "一条实际发送消息的正文。普通聊天只写一个自然段；"
+            "代码、列表、引用等预格式化内容可以包含换行。"
+        ),
     )
     target_ref: int | None = Field(
         default=None,

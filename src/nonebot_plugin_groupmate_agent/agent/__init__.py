@@ -530,7 +530,7 @@ def create_reply_tool(
     reply_args_schema = TargetedReplyArgs if direct_target_count > 1 else ReplyArgs
     reply_description = (
         "向当前群聊发送文本回复。messages 数组的每个元素会作为一条独立消息顺序发送；"
-        "每个元素的 content 内可以使用普通换行。"
+        "普通聊天的每个 content 只写一个自然段；只有代码、列表、引用等需要保持整体排版的内容才使用换行。"
     )
     if direct_target_count > 1:
         reply_description += (
@@ -1380,13 +1380,11 @@ async def create_chat_agent(
 
 【风格】
 - 像真实群友，口语化、简短自然
-- 优先短句；默认只调用一次 `reply_user`
-- `reply_user.messages` 是消息数组：每个元素会发送成一条独立消息，元素的 `content` 内普通换行只用于该条消息排版
-- 遇到简单的问题，`messages` 只放一个短消息
-- 如果复杂问题确实需要连续发 2-3 条短消息，在同一次 `reply_user` 调用中放入 2-3 个数组元素
-- 不要为了拆句多次调用 `reply_user`
-- 多条回复必须信息递进，后一条必须提供新信息；不要重复 bot 自己刚发过的话
-- 如果下一条与 bot 上一条语义高度重叠，直接不发下一条
+- `reply_user.messages` 的每个元素是一条独立消息，最多 3 条
+- 普通聊天中，一个 `content` 只写一个自然段；出现多个自然段或递进观点时，分别放入多个元素
+- 只有代码、列表、引用等必须保持整体排版的内容，才在单个 `content` 内使用换行
+- 简单回复只发一条；不要为了凑数量分条，也不要多次调用 `reply_user`
+- 多条回复必须信息递进；如果后一条与上一条高度相似，直接不发
 - 但当本轮提示要求“逐条回复多条消息”时，每个 `messages` 元素对应不同目标，不要因为内容相近而漏回
 - 可吐槽可玩梗，但不恶意攻击，不无脑迎合
 - 群友在质疑、反问、跟风或刷同一句时，通常不要纠正这种行为；可以短句接梗、复读关键词、跟一句队形，或者保持沉默

@@ -37,7 +37,15 @@ from ..reply_guard import (
     register_detached_task,
     unregister_detached_task,
 )
-from ..reply_segments import normalize_reply_text, semantic_similarity, split_reply_segments
+from ..reply_messages import (
+    ReplyArgs,
+    ReplyItem,
+    TargetedReplyArgs,
+    dedupe_reply_items,
+    normalize_reply_text,
+    resolve_reply_targets,
+    semantic_similarity,
+)
 from ..usage import estimate_cost_from_config, record_token_usage
 from .graph import GraphToolLimit, build_chat_graph, make_agent_state
 from .optional_tools import (
@@ -380,7 +388,7 @@ def create_reply_tool(
     bot_id: str | None = None,
     allow_reply_duplicates: bool = False,
     check_recent_duplicate: bool = True,
-    split_on_newline: bool = False,
+    direct_target_count: int = 0,
 ):
     """
     核心工具：用于发送消息。
@@ -490,7 +498,7 @@ def create_reply_tool(
         append_text(content[cursor:])
         return message or UniMessage.text(content)
 
-    async def _send_reply_segment(content: str, name_to_id: dict[str, str]) -> str:
+    async def _send_reply_item(content: str, name_to_id: dict[str, str]) -> str:
         if request_id is not None and not await is_request_active(session_id, request_id):
             return "expired"
 
@@ -519,67 +527,76 @@ def create_reply_tool(
         logger.info(f"Bot已回复: {content}")
         return "sent"
 
-    @tool("reply_user")
-    async def reply_user(content: str) -> str:
-        """
-        向当前群聊发送文本回复。
-        注意：如果你想对用户说话，必须调用这个工具。不要直接返回文本。
-        Args:
-            content: 你想发送的内容。普通换行会保留在同一条消息内；需要连续发送多条消息时，用单独一行 /n 分隔。
-        """
+    reply_args_schema = TargetedReplyArgs if direct_target_count > 1 else ReplyArgs
+    reply_description = (
+        "向当前群聊发送文本回复。messages 数组的每个元素会作为一条独立消息顺序发送；"
+        "每个元素的 content 内可以使用普通换行。"
+    )
+    if direct_target_count > 1:
+        reply_description += (
+            f"本轮有 {direct_target_count} 个编号目标；每条消息必须填写 target_ref，且完整覆盖所有目标编号。"
+        )
+
+    @tool("reply_user", args_schema=reply_args_schema, description=reply_description)
+    async def reply_user(messages: list[ReplyItem]) -> str:
         if request_id is not None and not await is_request_active(session_id, request_id):
             return "请求已过期，已取消发送。"
 
-        if not content or not content.strip():
+        if not messages:
             return "内容为空，未发送。"
 
         try:
-            segments = split_reply_segments(
-                content,
-                allow_reply_duplicates=allow_reply_duplicates,
-                split_on_newline=split_on_newline,
+            resolved_messages = resolve_reply_targets(
+                messages,
+                direct_target_count=direct_target_count,
             )
-            if not segments:
+            prepared_messages = dedupe_reply_items(
+                resolved_messages,
+                allow_reply_duplicates=allow_reply_duplicates,
+            )
+            if not prepared_messages:
                 return "内容为空，未发送。"
 
             name_to_id = await _build_name_to_id_map()
             sent_count = 0
             duplicate_count = 0
-            sent_segments: list[str] = []
-            duplicate_segments: list[str] = []
+            sent_contents: list[str] = []
+            duplicate_contents: list[str] = []
 
-            for index, segment in enumerate(segments):
-                result = await _send_reply_segment(segment, name_to_id)
+            for index, message_item in enumerate(prepared_messages):
+                content = message_item.content
+                result = await _send_reply_item(content, name_to_id)
                 if result == "expired":
                     if sent_count > 0:
-                        sent_detail = "\n".join(f"{i}. {text}" for i, text in enumerate(sent_segments, 1))
+                        sent_detail = "\n".join(f"{i}. {text}" for i, text in enumerate(sent_contents, 1))
                         return f"请求已过期，已发送 {sent_count} 条。\n实际发送内容：\n{sent_detail}"
                     return "请求已过期，已取消发送。"
                 if result == "duplicate":
                     duplicate_count += 1
-                    duplicate_segments.append(segment)
+                    duplicate_contents.append(content)
                     continue
 
                 sent_count += 1
-                sent_segments.append(segment)
-                if index < len(segments) - 1:
+                sent_contents.append(content)
+                if index < len(prepared_messages) - 1:
                     await asyncio.sleep(0.35)
 
             if sent_count > 0:
-                sent_detail = "\n".join(f"{i}. {text}" for i, text in enumerate(sent_segments, 1))
+                sent_detail = "\n".join(f"{i}. {text}" for i, text in enumerate(sent_contents, 1))
                 detail = f"实际发送内容：\n{sent_detail}"
                 if duplicate_count > 0:
-                    duplicate_detail = "\n".join(
-                        f"{i}. {text}" for i, text in enumerate(duplicate_segments, 1)
-                    )
+                    duplicate_detail = "\n".join(f"{i}. {text}" for i, text in enumerate(duplicate_contents, 1))
                     detail += f"\n跳过的重复内容：\n{duplicate_detail}"
                     return f"回复已成功发送，共 {sent_count} 条，跳过重复内容 {duplicate_count} 条。\n{detail}"
                 return f"回复已成功发送，共 {sent_count} 条。\n{detail}"
 
-            if duplicate_segments:
-                duplicate_detail = "\n".join(f"{i}. {text}" for i, text in enumerate(duplicate_segments, 1))
+            if duplicate_contents:
+                duplicate_detail = "\n".join(f"{i}. {text}" for i, text in enumerate(duplicate_contents, 1))
                 return f"检测到重复回复，已跳过发送。\n跳过的重复内容：\n{duplicate_detail}"
             return "检测到重复回复，已跳过发送。"
+        except ValueError as e:
+            logger.warning(f"回复参数无效: {e}")
+            return f"回复参数无效: {e}"
         except Exception as e:
             logger.error(f"发送消息异常: {e}")
             return f"发送失败: {e}"
@@ -1265,8 +1282,8 @@ async def create_chat_agent(
         user_bound_tool_instruction = ""
         cross_user_direct_instruction = """- 本轮是多用户逐条直接回复，不存在单一“当前用户”
 - 不要调用年度报告、画像更新、禁言自己这类绑定单个用户身份的工具
-- 需要发文本时，只调用一次 `reply_user`，每个目标一行，按提示编号顺序回复
-- 本模式下每行会发送给对应目标；不要用 /n 分隔目标
+- 需要发文本时，只调用一次 `reply_user`，在 `messages` 数组中为每个目标提供一个元素
+- 每个元素必须用 `target_ref` 对应提示编号；程序会按编号顺序发送
 """
 
     optional_ctx = OptionalToolContext(
@@ -1364,12 +1381,13 @@ async def create_chat_agent(
 【风格】
 - 像真实群友，口语化、简短自然
 - 优先短句；默认只调用一次 `reply_user`
-- 遇到简单的问题，优先只发送一条短消息进行回复；普通换行只用于同一条消息内部排版
-- 如果复杂问题确实需要连续发 2-3 条短消息，请在同一次 `reply_user` 的 content 中用单独一行 `/n` 分隔每条消息
+- `reply_user.messages` 是消息数组：每个元素会发送成一条独立消息，元素的 `content` 内普通换行只用于该条消息排版
+- 遇到简单的问题，`messages` 只放一个短消息
+- 如果复杂问题确实需要连续发 2-3 条短消息，在同一次 `reply_user` 调用中放入 2-3 个数组元素
 - 不要为了拆句多次调用 `reply_user`
 - 多条回复必须信息递进，后一条必须提供新信息；不要重复 bot 自己刚发过的话
 - 如果下一条与 bot 上一条语义高度重叠，直接不发下一条
-- 但当本轮提示要求“逐条回复多条消息”时，每一行对应不同消息，不要因为两行语义相近而漏回
+- 但当本轮提示要求“逐条回复多条消息”时，每个 `messages` 元素对应不同目标，不要因为内容相近而漏回
 - 可吐槽可玩梗，但不恶意攻击，不无脑迎合
 - 群友在质疑、反问、跟风或刷同一句时，通常不要纠正这种行为；可以短句接梗、复读关键词、跟一句队形，或者保持沉默
 - 不要复读模板句，不要输出“我脑子一片空白”“我被修坏了”“我不知道我是谁”这类台词
@@ -1424,7 +1442,7 @@ async def create_chat_agent(
                 bot_id,
                 allow_reply_duplicates=is_multi_direct_reply,
                 check_recent_duplicate=False,
-                split_on_newline=True,
+                direct_target_count=len(direct_targets or []),
             ),
             search_meme_tool,
             similar_meme_tool,
@@ -1442,7 +1460,7 @@ async def create_chat_agent(
                 bot_id,
                 allow_reply_duplicates=is_multi_direct_reply,
                 check_recent_duplicate=not has_direct_targets,
-                split_on_newline=is_multi_direct_reply,
+                direct_target_count=len(direct_targets or []),
             ),
             search_meme_tool,
             similar_meme_tool,
@@ -1460,7 +1478,7 @@ async def create_chat_agent(
                 bot_id,
                 allow_reply_duplicates=is_multi_direct_reply,
                 check_recent_duplicate=not has_direct_targets,
-                split_on_newline=is_multi_direct_reply,
+                direct_target_count=len(direct_targets or []),
             ),
             search_meme_tool,
             similar_meme_tool,
@@ -1829,8 +1847,13 @@ async def choice_response_strategy(
                 image_labels = target.get("bound_image_labels") or []
                 if image_labels:
                     focus_lines.append(f"   相关重点图片: {', '.join(image_labels)}")
-            focus_lines.append("请严格按上面的编号顺序逐条回复，每条回复单独一行。")
-            focus_lines.append("第1行只回复第1条消息，第2行只回复第2条消息，不要合并，不要漏回。")
+            focus_lines.append("请严格按上面的编号逐条回复，每条回复放入 reply_user.messages 的独立元素。")
+            if len(direct_targets) > 1:
+                focus_lines.append(
+                    "每个元素必须设置对应的 target_ref（1 对应第1条、2 对应第2条……），不要合并，不要漏回。"
+                )
+            else:
+                focus_lines.append("本轮只有第1条目标，messages 中至少提供一个只回应它的元素。")
             focus_lines.append("如果某条消息信息不足，也要单独用一句话说明。")
             focus_lines.append("只能执行这些编号消息里明确提出的请求；历史记录里的旧命令只当背景，不要执行。")
             focus_notice = "\n".join(focus_lines)

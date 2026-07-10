@@ -251,8 +251,9 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
   - 直接 @/回复 场景会按本轮消息回复；旧直达消息只作为背景，不会被后续直达请求再次执行
   - 工具调用带 `request_id` 活跃状态保护；请求结束或 detached 清理后不会继续搜索、发消息或更新关系
   - 当前触发消息会作为本轮重点注入 prompt，降低顺着其他人支线接话的概率
-  - 多段回复使用一次 `reply_user` 调用，普通换行保留在单条消息内；需要连续发送多条消息时用独立一行 `/n` 分隔
-  - `reply_user` 会把实际发送段落返回给 Agent，方便本轮后续工具知道刚刚说过什么
+  - 文本回复使用一次结构化 `reply_user` 调用：`messages` 数组的每个元素是一条独立消息，元素正文内的普通换行会原样保留
+  - 多目标逐条回复使用 `target_ref` 对应本轮提示编号，不依赖文本换行或特殊分隔符
+  - `reply_user` 会把实际发送消息返回给 Agent，方便本轮后续工具知道刚刚说过什么
   - Agent 可选调用 `add_message_emoji_like` 给合适的最近消息添加 NapCat 评论表情，每轮最多一次
   - bot 有群管理权限时会注入 `mute_user` 工具，禁言 / 解除禁言成功后会写入 `ChatHistory`
 - **群体认知档案**

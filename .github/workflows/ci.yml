@@ -32,6 +32,8 @@ jobs:
   check:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
     permissions:
       contents: read
     strategy:

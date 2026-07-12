@@ -29,6 +29,7 @@ class AgentState(TypedDict):
     llm_cached_tokens: int
     llm_cache_creation_tokens: int
     llm_total_tokens: int
+    active_skills: list[str]
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,7 @@ def make_agent_state(
         "llm_cached_tokens": 0,
         "llm_cache_creation_tokens": 0,
         "llm_total_tokens": 0,
+        "active_skills": [],
     }
 
 
@@ -262,11 +264,41 @@ def _log_llm_token_usage(response: AIMessage, state: AgentState) -> dict[str, in
     }
 
 
-def _make_agent_node(model: Any, tools: list[BaseTool], system_messages: Sequence[BaseMessage]) -> Any:
-    bound_model = model.bind_tools(tools)
+def _active_tools(
+    base_tools: Sequence[BaseTool],
+    tools_by_skill: Mapping[str, Sequence[BaseTool]],
+    active_skills: Sequence[str],
+) -> list[BaseTool]:
+    tools = list(base_tools)
+    known_names = {tool.name for tool in tools}
+    active_skill_names = set(active_skills)
+    for skill_name, skill_tools in tools_by_skill.items():
+        if skill_name not in active_skill_names:
+            continue
+        for tool_item in skill_tools:
+            if tool_item.name in known_names:
+                continue
+            tools.append(tool_item)
+            known_names.add(tool_item.name)
+    return tools
+
+
+def _make_agent_node(
+    model: Any,
+    base_tools: Sequence[BaseTool],
+    system_messages: Sequence[BaseMessage],
+    tools_by_skill: Mapping[str, Sequence[BaseTool]],
+) -> Any:
     normalized_system_messages = _normalize_system_messages(system_messages)
+    bound_models: dict[tuple[str, ...], Any] = {}
 
     async def agent_node(state: AgentState) -> dict[str, Any]:
+        visible_tools = _active_tools(base_tools, tools_by_skill, state.get("active_skills", []))
+        tool_names = tuple(tool_item.name for tool_item in visible_tools)
+        bound_model = bound_models.get(tool_names)
+        if bound_model is None:
+            bound_model = model.bind_tools(visible_tools)
+            bound_models[tool_names] = bound_model
         response: AIMessage = await bound_model.ainvoke([*normalized_system_messages, *state["messages"]])
         if not isinstance(response, AIMessage):
             response = AIMessage(content=str(getattr(response, "content", response)))
@@ -288,6 +320,8 @@ def _make_agent_node(model: Any, tools: list[BaseTool], system_messages: Sequenc
 def _make_tool_node(
     tools_by_name: dict[str, BaseTool],
     *,
+    base_tools: Sequence[BaseTool],
+    tools_by_skill: Mapping[str, Sequence[BaseTool]],
     global_tool_limit: int,
     named_tool_limits: dict[str, int],
 ) -> Any:
@@ -301,6 +335,7 @@ def _make_tool_node(
         tool_count = state.get("tool_count", 0)
         tool_run_counts = dict(state.get("tool_run_counts", {}))
         called_finish = 0
+        active_skills = list(state.get("active_skills", []))
         session_id = state["session_id"]
         request_id = state["request_id"]
         agent_ctx = _AgentContext(session_id=session_id, request_id=request_id)
@@ -324,6 +359,23 @@ def _make_tool_node(
                 results.append(ToolMessage(content="请求已过期，已取消执行。", tool_call_id=tool_call_id))
                 continue
 
+            tool = tools_by_name.get(name)
+            if tool is None:
+                results.append(ToolMessage(content=f"未知工具: {name}", tool_call_id=tool_call_id))
+                continue
+
+            visible_tool_names = {
+                tool_item.name for tool_item in _active_tools(base_tools, tools_by_skill, active_skills)
+            }
+            if name not in visible_tool_names:
+                results.append(
+                    ToolMessage(
+                        content=f"工具 `{name}` 当前未启用；请先调用 `load_agent_skill` 读取对应技能。",
+                        tool_call_id=tool_call_id,
+                    )
+                )
+                continue
+
             named_limit = named_tool_limits.get(name)
             current_tool_count = tool_run_counts.get(name, 0)
             if named_limit is not None and current_tool_count >= named_limit:
@@ -335,15 +387,19 @@ def _make_tool_node(
                 )
                 continue
 
-            tool = tools_by_name.get(name)
-            if tool is None:
-                results.append(ToolMessage(content=f"未知工具: {name}", tool_call_id=tool_call_id))
-                continue
-
-            tool_run_counts[name] = current_tool_count + 1
-
             raw_args = tool_call.get("args", {})
             args = raw_args if isinstance(raw_args, dict) else {}
+            if name == "load_agent_skill":
+                requested_skill = str(args.get("skill_name") or "").strip()
+                if requested_skill in active_skills:
+                    results.append(
+                        ToolMessage(
+                            content=f"技能 `{requested_skill}` 已经加载，无需重复读取。",
+                            tool_call_id=tool_call_id,
+                        )
+                    )
+                    continue
+            tool_run_counts[name] = current_tool_count + 1
             runtime = _build_tool_runtime(agent_ctx, tool_call_id, args)
             tool_input: Any = args
             if _tool_accepts_runtime(tool):
@@ -351,19 +407,26 @@ def _make_tool_node(
             elif not isinstance(raw_args, dict):
                 tool_input = raw_args
 
+            tool_succeeded = False
             try:
                 result = await tool.ainvoke(tool_input, runtime=runtime)
+                tool_succeeded = True
             except Exception as e:
                 logger.exception(f"[Agent] 工具执行失败 {name}")
                 result = f"工具执行出错: {e}"
 
             results.append(ToolMessage(content=str(result), tool_call_id=tool_call_id))
+            if tool_succeeded and name == "load_agent_skill":
+                requested_skill = str(args.get("skill_name") or "").strip()
+                if requested_skill in tools_by_skill and requested_skill not in active_skills:
+                    active_skills.append(requested_skill)
 
         return {
             "messages": results,
             "tool_count": tool_count,
             "tool_run_counts": tool_run_counts,
             "called_finish": called_finish,
+            "active_skills": active_skills,
         }
 
     return tool_node
@@ -393,9 +456,13 @@ def build_chat_graph(
     tools: list[BaseTool],
     system_messages: Sequence[BaseMessage],
     *,
+    base_tools: Sequence[BaseTool] | None = None,
+    tools_by_skill: Mapping[str, Sequence[BaseTool]] | None = None,
     tool_limits: Sequence[GraphToolLimit] | None = None,
 ) -> Any:
     global_tool_limit, named_tool_limits = _normalize_limits(tool_limits)
+    normalized_base_tools = list(base_tools) if base_tools is not None else list(tools)
+    normalized_tools_by_skill = dict(tools_by_skill or {})
     tools_by_name: dict[str, BaseTool] = {}
     for tool in tools:
         if tool.name in tools_by_name:
@@ -403,11 +470,16 @@ def build_chat_graph(
         tools_by_name[tool.name] = tool
 
     builder = StateGraph(AgentState)
-    builder.add_node("agent", _make_agent_node(model, tools, system_messages))
+    builder.add_node(
+        "agent",
+        _make_agent_node(model, normalized_base_tools, system_messages, normalized_tools_by_skill),
+    )
     builder.add_node(
         "tools",
         _make_tool_node(
             tools_by_name,
+            base_tools=normalized_base_tools,
+            tools_by_skill=normalized_tools_by_skill,
             global_tool_limit=global_tool_limit,
             named_tool_limits=named_tool_limits,
         ),

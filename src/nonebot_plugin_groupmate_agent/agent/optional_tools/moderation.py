@@ -10,7 +10,7 @@ from nonebot_plugin_uninfo import SceneType
 
 from ...model import ChatHistory
 from ...reply_guard import can_request_continue
-from .types import OptionalToolBundle, OptionalToolContext
+from .types import AgentSkill, OptionalToolBundle, OptionalToolContext
 
 PERMISSION_STATUS = """
 【你的权限】
@@ -183,5 +183,12 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
     return OptionalToolBundle(
         name="moderation",
         tools=[create_mute_tool(ctx)],
-        prompt=PROMPT,
+        skills=[
+            AgentSkill(
+                name="moderation",
+                description="在 bot 有管理权限时执行群禁言或解除禁言。",
+                prompt=PROMPT,
+                tool_names=("mute_user",),
+            )
+        ],
     )

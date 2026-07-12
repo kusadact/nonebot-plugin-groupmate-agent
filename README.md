@@ -237,6 +237,47 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
 
 `ctx.create_detached_task(...)` 会负责注册 detached 状态、记录异常并在后台任务结束后清理状态。
 不要只调用 `ctx.detach_request(...)` 后继续在当前工具协程里 `await` 长任务；这会继续占用当前 Agent worker，并且仍会受 Agent 超时影响。
+
+### 按需 AgentSkill
+
+动态工具加载与 `AgentSkill` 可以同时使用：`healthcheck(ctx)` / `build(ctx)` 仍负责发现和构造工具，
+`AgentSkill` 只控制完整规则与关联工具 schema 何时暴露给主模型。没有声明 `skills` 的旧工具保持始终可见，行为不变。
+
+```python
+from langchain.tools import tool
+from nonebot_plugin_groupmate_agent.agent.optional_tools import (
+    AgentSkill,
+    OptionalToolBundle,
+    OptionalToolContext,
+)
+
+
+async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
+    @tool("query_score")
+    async def query_score(user_id: str) -> str:
+        """查询用户成绩。"""
+        return await fetch_score(user_id)
+
+    return OptionalToolBundle(
+        name="score_tools",
+        tools=[query_score],
+        skills=[
+            AgentSkill(
+                name="score_report",
+                description="查询和解读用户成绩。",
+                prompt="""成绩工具规则：
+- 查询成绩时调用 `query_score`
+- 只允许查询当前会话内有权限查看的用户
+""",
+                tool_names=("query_score",),
+            )
+        ],
+    )
+```
+
+初始 Agent prompt 只包含 `score_report` 的名称和简短 `description`。模型调用
+`load_agent_skill("score_report")` 后才会读取完整 `prompt`，并在下一轮看到 `query_score` 的工具 schema。
+`prompt` 也可以是接收当前上下文的同步或异步函数。`tool_names` 为空时，Skill 只延迟加载规则，不控制工具可见性。
 </details>
 
 ## ✨ 当前分支能力

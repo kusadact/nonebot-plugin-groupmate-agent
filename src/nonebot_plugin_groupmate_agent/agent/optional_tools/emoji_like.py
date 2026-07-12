@@ -7,7 +7,7 @@ from nonebot.log import logger
 from nonebot_plugin_alconna import message_reaction
 
 from ...reply_guard import can_request_continue
-from .types import OptionalToolBundle, OptionalToolContext, ToolLimitSpec
+from .types import AgentSkill, OptionalToolBundle, OptionalToolContext, ToolLimitSpec
 
 
 @dataclass(frozen=True)
@@ -573,6 +573,13 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
     return OptionalToolBundle(
         name="emoji_like",
         tools=[emoji_like_tool],
-        prompt=PROMPT_TEMPLATE.format(categories=EMOJI_LIKE_CATEGORY_PROMPT),
+        skills=[
+            AgentSkill(
+                name="emoji_like",
+                description="给合适的最近消息添加 QQ 评论表情。",
+                prompt=PROMPT_TEMPLATE.format(categories=EMOJI_LIKE_CATEGORY_PROMPT),
+                tool_names=("add_message_emoji_like",),
+            )
+        ],
         tool_limits=[ToolLimitSpec(tool_name="add_message_emoji_like", run_limit=1)],
     )

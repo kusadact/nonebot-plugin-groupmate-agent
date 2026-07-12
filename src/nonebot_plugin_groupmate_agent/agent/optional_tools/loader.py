@@ -161,7 +161,7 @@ async def _build_optional_tool_bundle(
     if not isinstance(bundle, OptionalToolBundle):
         logger.warning(f"可选 Agent 工具 build() 返回值不是 OptionalToolBundle: {source}")
         return None
-    if not (bundle.tools or bundle.prompt or bundle.tool_limits):
+    if not (bundle.tools or bundle.prompt or bundle.skills or bundle.tool_limits):
         return None
     return bundle
 
@@ -196,7 +196,7 @@ async def _inspect_optional_tool_module(
             enabled=False,
             reason="build() did not return OptionalToolBundle",
         ), None
-    if not (bundle.tools or bundle.prompt or bundle.tool_limits):
+    if not (bundle.tools or bundle.prompt or bundle.skills or bundle.tool_limits):
         return OptionalToolStatus(name=bundle.name or name, source=source, enabled=False, reason="empty bundle"), None
 
     return (
@@ -205,6 +205,7 @@ async def _inspect_optional_tool_module(
             source=source,
             enabled=True,
             tool_names=[_tool_name(tool_item) for tool_item in bundle.tools],
+            skill_names=[skill.name for skill in bundle.skills],
         ),
         bundle,
     )
@@ -272,6 +273,7 @@ async def list_optional_tool_statuses(ctx: OptionalToolContext) -> list[Optional
                 source=source,
                 enabled=True,
                 tool_names=[_tool_name(tool_item) for tool_item in bundle.tools],
+                skill_names=[skill.name for skill in bundle.skills],
             )
         )
 

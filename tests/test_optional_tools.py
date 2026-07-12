@@ -15,6 +15,7 @@ registry = load_module(
     "groupmate_agent_tool_pkg.agent.optional_tools.registry",
     "agent/optional_tools/registry.py",
 )
+skills = load_module("groupmate_agent_tool_pkg.agent.skills", "agent/skills.py")
 STUB_TOOL_MODULE_NAMES = (
     "calculator",
     "emoji_like",
@@ -118,6 +119,72 @@ def test_registered_agent_tool_bundle_is_converted_to_optional_bundle():
     registry.clear_registered_agent_tools()
 
 
+def test_registered_agent_tool_bundle_preserves_agent_skills():
+    registry.clear_registered_agent_tools()
+
+    @tool("skill_tool")
+    async def skill_tool() -> str:
+        """技能工具。"""
+        return "ok"
+
+    @registry.register_agent_tool
+    def build_skill_tools(ctx):
+        return registry.AgentToolBundle(
+            name="registered_skill",
+            tools=[skill_tool],
+            skills=[
+                types.AgentSkill(
+                    name="registered_skill",
+                    description="测试按需技能。",
+                    prompt="完整技能规则",
+                    tool_names=("skill_tool",),
+                )
+            ],
+        )
+
+    bundles = asyncio.run(registry.build_registered_agent_tool_bundles(make_ctx()))
+
+    assert len(bundles) == 1
+    assert bundles[0].skills == [
+        types.AgentSkill(
+            name="registered_skill",
+            description="测试按需技能。",
+            prompt="完整技能规则",
+            tool_names=("skill_tool",),
+        )
+    ]
+
+    registry.clear_registered_agent_tools()
+
+
+def test_registered_agent_skill_prompt_receives_agent_tool_context():
+    registry.clear_registered_agent_tools()
+
+    @registry.register_agent_tool
+    def build_skill(ctx):
+        async def prompt(prompt_ctx):
+            assert isinstance(prompt_ctx, registry.AgentToolContext)
+            return f"registered session={prompt_ctx.session_id}"
+
+        return registry.AgentToolBundle(
+            name="registered_dynamic_skill",
+            skills=[
+                types.AgentSkill(
+                    name="registered_dynamic_skill",
+                    description="注册式动态技能。",
+                    prompt=prompt,
+                )
+            ],
+        )
+
+    bundles = asyncio.run(registry.build_registered_agent_tool_bundles(make_ctx()))
+    prompt = asyncio.run(skills.resolve_agent_skill_prompt(bundles[0].skills[0], make_ctx()))
+
+    assert prompt == "registered session=group-1"
+
+    registry.clear_registered_agent_tools()
+
+
 def test_registered_agent_tool_accepts_single_tool_return():
     registry.clear_registered_agent_tools()
 
@@ -159,7 +226,18 @@ def test_loader_includes_registered_tools_in_statuses():
             """测试状态工具。"""
             return "ok"
 
-        return registry.AgentToolBundle(name="status_bundle", tools=[status_tool])
+        return registry.AgentToolBundle(
+            name="status_bundle",
+            tools=[status_tool],
+            skills=[
+                types.AgentSkill(
+                    name="status_skill",
+                    description="状态技能。",
+                    prompt="状态技能规则",
+                    tool_names=("status_tool",),
+                )
+            ],
+        )
 
     statuses = asyncio.run(loader.list_optional_tool_statuses(make_ctx()))
     status = next(item for item in statuses if item.name == "status_bundle")
@@ -167,5 +245,132 @@ def test_loader_includes_registered_tools_in_statuses():
     assert status.enabled is True
     assert status.source.startswith("registered:")
     assert status.tool_names == ["status_tool"]
+    assert status.skill_names == ["status_skill"]
 
     registry.clear_registered_agent_tools()
+
+
+def test_user_tool_module_can_dynamically_register_a_lazy_skill(tmp_path, monkeypatch):
+    registry.clear_registered_agent_tools()
+    module_path = tmp_path / "lazy_user_tool.py"
+    module_path.write_text(
+        """
+from langchain.tools import tool
+from groupmate_agent_tool_pkg.agent.optional_tools.types import AgentSkill, OptionalToolBundle
+
+
+async def build(ctx):
+    @tool("lazy_user_tool")
+    async def lazy_user_tool(text: str) -> str:
+        \"\"\"测试动态目录工具。\"\"\"
+        return text
+
+    return OptionalToolBundle(
+        name="lazy_user_bundle",
+        tools=[lazy_user_tool],
+        skills=[
+            AgentSkill(
+                name="lazy_user_skill",
+                description="动态加载的用户技能。",
+                prompt="完整用户技能规则",
+                tool_names=("lazy_user_tool",),
+            )
+        ],
+    )
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(loader, "get_user_tools_dir", lambda: tmp_path)
+
+    bundles = asyncio.run(loader.load_optional_tool_bundles(make_ctx()))
+    bundle = next(item for item in bundles if item.name == "lazy_user_bundle")
+
+    assert [tool_item.name for tool_item in bundle.tools] == ["lazy_user_tool"]
+    assert [skill.name for skill in bundle.skills] == ["lazy_user_skill"]
+
+
+def test_agent_skill_index_only_contains_names_and_descriptions():
+    skill = types.AgentSkill(
+        name="weather",
+        description="查询实时天气。",
+        prompt="这是不应出现在索引里的完整天气规则",
+        tool_names=("search_weather",),
+    )
+
+    index = skills.build_agent_skill_index([skill])
+
+    assert "weather" in index
+    assert "查询实时天气" in index
+    assert "完整天气规则" not in index
+
+
+def test_agent_skill_loader_resolves_async_dynamic_prompt():
+    async def dynamic_prompt(ctx):
+        return f"只允许查询会话 {ctx.session_id}"
+
+    loader_tool = skills.create_agent_skill_loader_tool(
+        [
+            types.AgentSkill(
+                name="dynamic",
+                description="动态规则。",
+                prompt=dynamic_prompt,
+            )
+        ],
+        make_ctx(),
+    )
+
+    assert loader_tool is not None
+    result = asyncio.run(loader_tool.ainvoke({"skill_name": "dynamic"}))
+    assert result == "只允许查询会话 group-1"
+
+
+def test_prepare_agent_skill_tools_keeps_legacy_tools_visible_and_gates_skill_tools():
+    @tool("legacy_tool")
+    async def legacy_tool() -> str:
+        """旧工具。"""
+        return "legacy"
+
+    @tool("lazy_tool")
+    async def lazy_tool() -> str:
+        """按需工具。"""
+        return "lazy"
+
+    setup = skills.prepare_agent_skill_tools(
+        [legacy_tool, lazy_tool],
+        [
+            types.AgentSkill(
+                name="lazy_skill",
+                description="按需技能。",
+                prompt="完整规则",
+                tool_names=("lazy_tool",),
+            )
+        ],
+    )
+
+    assert [tool_item.name for tool_item in setup.tools] == ["legacy_tool", "lazy_tool"]
+    assert [tool_item.name for tool_item in setup.base_tools] == ["legacy_tool"]
+    assert [tool_item.name for tool_item in setup.tools_by_skill["lazy_skill"]] == ["lazy_tool"]
+
+
+def test_duplicate_skill_names_merge_tool_mappings_without_exposing_tools():
+    @tool("first_tool")
+    async def first_tool() -> str:
+        """第一个工具。"""
+        return "first"
+
+    @tool("second_tool")
+    async def second_tool() -> str:
+        """第二个工具。"""
+        return "second"
+
+    setup = skills.prepare_agent_skill_tools(
+        [first_tool, second_tool],
+        [
+            types.AgentSkill("shared", "首个描述。", "首个规则", ("first_tool",)),
+            types.AgentSkill("shared", "第二个描述。", "第二个规则", ("second_tool",)),
+        ],
+    )
+
+    assert setup.base_tools == []
+    assert setup.skills == [types.AgentSkill("shared", "首个描述。", "首个规则", ("first_tool", "second_tool"))]
+    assert [tool_item.name for tool_item in setup.tools_by_skill["shared"]] == ["first_tool", "second_tool"]

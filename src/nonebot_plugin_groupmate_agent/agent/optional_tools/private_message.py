@@ -10,7 +10,7 @@ from sqlalchemy import Select
 
 from ...model import ChatHistory
 from ...reply_guard import can_request_continue
-from .types import OptionalToolBundle, OptionalToolContext, ToolLimitSpec
+from .types import AgentSkill, OptionalToolBundle, OptionalToolContext, ToolLimitSpec
 
 
 def _config_enabled(ctx: OptionalToolContext) -> bool:
@@ -208,6 +208,13 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
     return OptionalToolBundle(
         name="private_message",
         tools=[create_private_message_tool(ctx)],
-        prompt=prompt,
+        skills=[
+            AgentSkill(
+                name="private_message",
+                description="在确实不适合公开回复时主动私聊当前群成员。",
+                prompt=prompt,
+                tool_names=("send_private_message",),
+            )
+        ],
         tool_limits=[ToolLimitSpec(tool_name="send_private_message", run_limit=1)],
     )

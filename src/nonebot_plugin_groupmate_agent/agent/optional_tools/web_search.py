@@ -5,7 +5,7 @@ from langchain_tavily import TavilySearch
 from nonebot.log import logger
 
 from ...reply_guard import can_request_continue
-from .types import OptionalToolBundle, OptionalToolContext
+from .types import AgentSkill, OptionalToolBundle, OptionalToolContext
 
 PROMPT = "- 外部知识、缩写、术语：优先 `search_web`"
 
@@ -36,4 +36,15 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
         results = await tavily_search.ainvoke(query)
         return results
 
-    return OptionalToolBundle(name="web_search", tools=[search_web], prompt=PROMPT)
+    return OptionalToolBundle(
+        name="web_search",
+        tools=[search_web],
+        skills=[
+            AgentSkill(
+                name="web_search",
+                description="查询外部知识、天气、新闻和其他实时网络信息。",
+                prompt=PROMPT,
+                tool_names=("search_web",),
+            )
+        ],
+    )

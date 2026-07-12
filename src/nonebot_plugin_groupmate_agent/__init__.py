@@ -1304,8 +1304,9 @@ def _format_tool_statuses(statuses) -> str:
     skipped_lines = []
     for status in statuses:
         tool_suffix = f" ({', '.join(status.tool_names)})" if status.tool_names else ""
+        skill_suffix = f" [skills: {', '.join(status.skill_names)}]" if status.skill_names else ""
         if status.enabled:
-            enabled_lines.append(f"- {status.name}{tool_suffix}")
+            enabled_lines.append(f"- {status.name}{tool_suffix}{skill_suffix}")
         else:
             skipped_lines.append(f"- {status.name}: {status.reason or 'not injected'}")
 

@@ -1,7 +1,7 @@
 from langchain.tools import tool
 from simpleeval import simple_eval
 
-from .types import OptionalToolBundle, OptionalToolContext
+from .types import AgentSkill, OptionalToolBundle, OptionalToolContext
 
 
 async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
@@ -22,4 +22,15 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
         except Exception as e:
             return f"计算失败。请检查表达式是否正确，错误信息: {e}"
 
-    return OptionalToolBundle(name="calculator", tools=[calculate_expression])
+    return OptionalToolBundle(
+        name="calculator",
+        tools=[calculate_expression],
+        skills=[
+            AgentSkill(
+                name="calculator",
+                description="执行需要精确结果的数学表达式计算。",
+                prompt="- 精确数学计算使用 `calculate_expression`，不要心算复杂表达式。",
+                tool_names=("calculate_expression",),
+            )
+        ],
+    )

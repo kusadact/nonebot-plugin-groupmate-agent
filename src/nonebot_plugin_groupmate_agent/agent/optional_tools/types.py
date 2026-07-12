@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
@@ -9,11 +11,25 @@ class ToolLimitSpec:
     run_limit: int
 
 
+AgentSkillPrompt = str | Callable[[Any], str | Awaitable[str]]
+
+
+@dataclass(frozen=True)
+class AgentSkill:
+    """Prompt and tool metadata exposed to the model only when requested."""
+
+    name: str
+    description: str
+    prompt: AgentSkillPrompt
+    tool_names: tuple[str, ...] = ()
+
+
 @dataclass
 class OptionalToolBundle:
     name: str
     tools: list[Any] = field(default_factory=list)
     prompt: str = ""
+    skills: list[AgentSkill] = field(default_factory=list)
     tool_limits: list[ToolLimitSpec] = field(default_factory=list)
 
 
@@ -24,6 +40,7 @@ class OptionalToolStatus:
     enabled: bool
     reason: str = ""
     tool_names: list[str] = field(default_factory=list)
+    skill_names: list[str] = field(default_factory=list)
 
 
 @dataclass

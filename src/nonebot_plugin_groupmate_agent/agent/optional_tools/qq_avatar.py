@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from ...model import ChatHistory
 from ...reply_guard import can_request_continue, mark_request_sent as mark_guard_request_sent
-from .types import OptionalToolBundle, OptionalToolContext, ToolLimitSpec
+from .types import AgentSkill, OptionalToolBundle, OptionalToolContext, ToolLimitSpec
 
 require("nonebot_plugin_localstore")
 import nonebot_plugin_localstore as store
@@ -463,14 +463,22 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
     调用 `send_qq_avatar_image`，直接把原头像发到群里；不要调用生图工具
   - 用户要求“用某人头像做图 / 给某人头像二创 / 把某人头像生成某种风格”时：
     调用 `fetch_qq_avatar_references` 获取参考图 path，再调用后续图片工具
-  - `target_user_names` 可填群名片、昵称、QQ号；“我/自己”表示当前发起用户；“你/你自己/bot/机器人/{getattr(ctx.config, "bot_name", "bot")}”表示 bot 自己
+  - `target_user_names` 可填群名片、昵称、QQ号；“我/自己”表示当前发起用户
+  - “你/你自己/bot/机器人/{getattr(ctx.config, "bot_name", "bot")}”表示 bot 自己
   - `fetch_qq_avatar_references` 只返回本地头像图片 `path`，不会发送图片
   - 当前最多获取 {QQ_AVATAR_MAX_REFERENCE_AVATARS} 个用户头像
 """
     return OptionalToolBundle(
         name="qq_avatar",
         tools=[create_qq_avatar_tool(ctx), create_send_qq_avatar_tool(ctx)],
-        prompt=prompt,
+        skills=[
+            AgentSkill(
+                name="qq_avatar",
+                description="查找、发送 QQ 头像，或取得头像本地路径供后续工具使用。",
+                prompt=prompt,
+                tool_names=("fetch_qq_avatar_references", "send_qq_avatar_image"),
+            )
+        ],
         tool_limits=[
             ToolLimitSpec(tool_name="fetch_qq_avatar_references", run_limit=1),
             ToolLimitSpec(tool_name="send_qq_avatar_image", run_limit=1),

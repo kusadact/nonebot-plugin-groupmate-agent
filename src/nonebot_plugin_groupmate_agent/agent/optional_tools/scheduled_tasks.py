@@ -19,7 +19,7 @@ from nonebot_plugin_groupmate_agent.model import ChatHistory, ChatHistorySchema
 from nonebot_plugin_groupmate_agent.reply_guard import is_request_active
 
 from ..prompt_cache import add_ephemeral_cache_marker, should_use_explicit_prompt_cache
-from .types import OptionalToolBundle, OptionalToolContext, ToolLimitSpec
+from .types import AgentSkill, OptionalToolBundle, OptionalToolContext, ToolLimitSpec
 
 SCHEDULED_AGENT_HISTORY_LIMIT = 20
 DEFAULT_MIN_DELAY_SECONDS = 10.0
@@ -487,7 +487,14 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
             create_schedule_message_tool(ctx, config),
             create_schedule_agent_task_tool(ctx, config),
         ],
-        prompt=prompt,
+        skills=[
+            AgentSkill(
+                name="scheduled_tasks",
+                description="安排延迟提醒、固定消息或到点后执行 Agent 任务。",
+                prompt=prompt,
+                tool_names=("schedule_message", "schedule_agent_task"),
+            )
+        ],
         tool_limits=[
             ToolLimitSpec(tool_name="schedule_message", run_limit=1),
             ToolLimitSpec(tool_name="schedule_agent_task", run_limit=1),

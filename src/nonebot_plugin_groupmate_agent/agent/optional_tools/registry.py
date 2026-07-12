@@ -7,7 +7,7 @@ from typing import Any
 
 from nonebot.log import logger
 
-from .types import OptionalToolBundle, OptionalToolContext, ToolLimitSpec
+from .types import AgentSkill, OptionalToolBundle, OptionalToolContext, ToolLimitSpec
 
 
 @dataclass(frozen=True)
@@ -45,6 +45,7 @@ class AgentToolContext:
 class AgentToolBundle:
     tools: Iterable[Any] = field(default_factory=tuple)
     instructions: Iterable[str] = field(default_factory=tuple)
+    skills: Iterable[AgentSkill] = field(default_factory=tuple)
     name: str | None = None
     tool_limits: Iterable[ToolLimitSpec] = field(default_factory=tuple)
 
@@ -126,6 +127,25 @@ def _make_agent_tool_context(ctx: OptionalToolContext) -> AgentToolContext:
     )
 
 
+def _adapt_registered_skill(skill: AgentSkill) -> AgentSkill:
+    prompt = skill.prompt
+    if not callable(prompt):
+        return skill
+
+    async def adapted_prompt(ctx: OptionalToolContext) -> str:
+        result = prompt(_make_agent_tool_context(ctx))
+        if inspect.isawaitable(result):
+            result = await result
+        return str(result or "")
+
+    return AgentSkill(
+        name=skill.name,
+        description=skill.description,
+        prompt=adapted_prompt,
+        tool_names=skill.tool_names,
+    )
+
+
 def _normalize_tool_result(result: Any, *, fallback_name: str) -> OptionalToolBundle:
     if result is None:
         return OptionalToolBundle(name=fallback_name)
@@ -136,6 +156,7 @@ def _normalize_tool_result(result: Any, *, fallback_name: str) -> OptionalToolBu
             name=result.name or fallback_name,
             tools=[tool_item for tool_item in result.tools if tool_item is not None],
             prompt="\n".join(str(item).strip() for item in result.instructions if item and str(item).strip()),
+            skills=[_adapt_registered_skill(skill) for skill in result.skills if skill is not None],
             tool_limits=list(result.tool_limits),
         )
     if hasattr(result, "name") and (hasattr(result, "invoke") or hasattr(result, "ainvoke")):
@@ -165,7 +186,7 @@ async def build_registered_agent_tool_bundles(ctx: OptionalToolContext) -> list[
             logger.exception(f"加载注册 Agent 工具失败: {_source_name(factory)}")
             continue
 
-        if bundle.tools or bundle.prompt or bundle.tool_limits:
+        if bundle.tools or bundle.prompt or bundle.skills or bundle.tool_limits:
             bundles.append(bundle)
 
     return bundles
@@ -188,7 +209,7 @@ async def inspect_registered_agent_tool_factory(
         logger.exception(f"加载注册 Agent 工具失败: {_source_name(factory)}")
         return None, f"{type(e).__name__}: {e}"
 
-    if not (bundle.tools or bundle.prompt or bundle.tool_limits):
+    if not (bundle.tools or bundle.prompt or bundle.skills or bundle.tool_limits):
         return None, "empty bundle"
     return bundle, ""
 

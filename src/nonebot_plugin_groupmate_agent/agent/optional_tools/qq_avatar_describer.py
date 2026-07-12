@@ -8,13 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from langchain.tools import tool
-from langchain_core.messages import HumanMessage as LCHumanMessage
-from langchain_core.messages import SystemMessage as LCSystemMessage
+from langchain_core.messages import HumanMessage as LCHumanMessage, SystemMessage as LCSystemMessage
 from langchain_openai import ChatOpenAI
 from nonebot.log import logger
 from pydantic import BaseModel, Field, SecretStr
 
-from .types import OptionalToolBundle, OptionalToolContext, ToolLimitSpec
+from .types import AgentSkill, OptionalToolBundle, OptionalToolContext, ToolLimitSpec
 
 DEFAULT_QUESTION = (
     "请用中文描述这个 QQ 头像长什么样。重点说明画面主体、人物/角色特征、表情、颜色、文字、"
@@ -265,13 +264,22 @@ async def build(ctx: OptionalToolContext) -> OptionalToolBundle:
   - 用户要求“头像长什么样 / 描述头像 / 分析头像 / 看看头像内容 / 这个头像是什么”时：
     先调用内置 `fetch_qq_avatar_references` 获取头像 path，再调用 `describe_qq_avatar_image`
   - 用户只是要求“发头像 / 发原头像 / 把头像发群里”时，不要调用本工具；应调用 `send_qq_avatar_image`
-  - 用户要求“用头像生成图片 / 头像二创 / P图 / 改头像”时，不要调用本工具；应调用 `fetch_qq_avatar_references` 后交给生图工具
-  - `describe_qq_avatar_image.reference_image_paths` 可以直接填写 `fetch_qq_avatar_references` 的完整返回文本或其中的 path
+  - 用户要求“用头像生成图片 / 头像二创 / P图 / 改头像”时，不要调用本工具
+    应调用 `fetch_qq_avatar_references` 后交给生图工具
+  - `describe_qq_avatar_image.reference_image_paths` 可以填写 `fetch_qq_avatar_references`
+    的完整返回文本或其中的 path
   - 当前最多查看 {MAX_AVATAR_IMAGES} 张头像
 """
     return OptionalToolBundle(
         name="qq_avatar_describer",
         tools=[create_avatar_describer_tool(ctx)],
-        prompt=prompt,
+        skills=[
+            AgentSkill(
+                name="qq_avatar_description",
+                description="使用多模态模型描述或分析 QQ 头像内容。",
+                prompt=prompt,
+                tool_names=("describe_qq_avatar_image",),
+            )
+        ],
         tool_limits=[ToolLimitSpec(tool_name="describe_qq_avatar_image", run_limit=1)],
     )

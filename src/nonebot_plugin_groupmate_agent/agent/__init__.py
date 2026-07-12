@@ -49,6 +49,7 @@ from ..reply_messages import (
 from ..usage import estimate_cost_from_config, record_token_usage
 from .graph import GraphToolLimit, build_chat_graph, make_agent_state
 from .optional_tools import (
+    AgentSkill,
     AgentToolBundle,
     AgentToolContext,
     OptionalToolContext,
@@ -58,10 +59,12 @@ from .optional_tools import (
 from .optional_tools.emoji_like import extract_emoji_like_message_id_text
 from .optional_tools.moderation import PERMISSION_STATUS
 from .prompt_cache import add_ephemeral_cache_marker, build_system_messages, should_use_explicit_prompt_cache
+from .skills import build_agent_skill_index, create_agent_skill_loader_tool, prepare_agent_skill_tools
 
 __all__ = [
     "AgentToolBundle",
     "AgentToolContext",
+    "AgentSkill",
     "check_if_should_reply",
     "choice_response_strategy",
     "register_agent_tool",
@@ -1369,8 +1372,21 @@ async def create_chat_agent(
         optional_ctx.clear_detached = _clear_detached
         optional_ctx.create_detached_task = _create_detached_task
     optional_bundles = await load_optional_tool_bundles(optional_ctx)
-    optional_tools = [tool_item for bundle in optional_bundles for tool_item in bundle.tools]
+    skill_tool_setup = prepare_agent_skill_tools(
+        (tool_item for bundle in optional_bundles for tool_item in bundle.tools),
+        (skill for bundle in optional_bundles for skill in bundle.skills),
+    )
+    optional_tools = skill_tool_setup.tools
+    agent_skills = skill_tool_setup.skills
+    base_optional_tools = skill_tool_setup.base_tools
+    tools_by_skill = skill_tool_setup.tools_by_skill
+    skill_loader_tool = create_agent_skill_loader_tool(agent_skills, optional_ctx)
     optional_tool_instructions = "\n".join(bundle.prompt for bundle in optional_bundles if bundle.prompt)
+    skill_index = build_agent_skill_index(agent_skills)
+    if skill_index:
+        optional_tool_instructions = "\n".join(
+            part for part in (optional_tool_instructions, skill_index) if part.strip()
+        )
 
     stable_system_prompt = f"""你是QQ群群友「{plugin_config.bot_name}」。
 你不是助手，不承认自己是AI。
@@ -1431,7 +1447,7 @@ async def create_chat_agent(
         None if is_cross_user_direct_reply else user_id,
     )
     if is_cross_user_direct_reply:
-        tools = [
+        base_tools = [
             search_history_context,
             create_reply_tool(
                 session_id,
@@ -1445,11 +1461,12 @@ async def create_chat_agent(
             search_meme_tool,
             similar_meme_tool,
             send_meme_tool,
-            *optional_tools,
+            *base_optional_tools,
+            *([skill_loader_tool] if skill_loader_tool is not None else []),
             finish,
         ]
     elif not user_id or not user_name:
-        tools = [
+        base_tools = [
             search_history_context,
             create_reply_tool(
                 session_id,
@@ -1463,11 +1480,12 @@ async def create_chat_agent(
             search_meme_tool,
             similar_meme_tool,
             send_meme_tool,
-            *optional_tools,
+            *base_optional_tools,
+            *([skill_loader_tool] if skill_loader_tool is not None else []),
             finish,
         ]
     else:
-        tools = [
+        base_tools = [
             search_history_context,
             create_reply_tool(
                 session_id,
@@ -1482,9 +1500,18 @@ async def create_chat_agent(
             similar_meme_tool,
             send_meme_tool,
             relation_tool,
-            *optional_tools,
+            *base_optional_tools,
+            *([skill_loader_tool] if skill_loader_tool is not None else []),
             finish,
         ]
+
+    tools = list(base_tools)
+    known_tool_names = {tool_item.name for tool_item in tools}
+    for tool_item in optional_tools:
+        if tool_item.name in known_tool_names:
+            continue
+        tools.append(tool_item)
+        known_tool_names.add(tool_item.name)
 
     tool_limits = [
         GraphToolLimit(tool_name=None, run_limit=20),
@@ -1500,7 +1527,14 @@ async def create_chat_agent(
         tool_mode_prompt,
         use_cache_control=_use_explicit_prompt_cache(),
     )
-    graph = build_chat_graph(model, tools, system_messages, tool_limits=tool_limits)
+    graph = build_chat_graph(
+        model,
+        tools,
+        system_messages,
+        base_tools=base_tools,
+        tools_by_skill=tools_by_skill,
+        tool_limits=tool_limits,
+    )
     context_messages: list[BaseMessage] = []
     if context_prompt.strip():
         context_messages.append(HumanMessage(content=context_prompt))

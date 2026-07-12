@@ -5,11 +5,12 @@ from .registry import (
     clear_registered_agent_tools,
     register_agent_tool,
 )
-from .types import OptionalToolBundle, OptionalToolContext, OptionalToolStatus, ToolLimitSpec
+from .types import AgentSkill, OptionalToolBundle, OptionalToolContext, OptionalToolStatus, ToolLimitSpec
 
 __all__ = [
     "AgentToolBundle",
     "AgentToolContext",
+    "AgentSkill",
     "OptionalToolBundle",
     "OptionalToolContext",
     "OptionalToolStatus",

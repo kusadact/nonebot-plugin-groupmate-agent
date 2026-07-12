@@ -125,7 +125,9 @@ def test_private_message_builds_bundle_when_enabled():
     assert bundle.name == "private_message"
     assert bundle.tools[0].name == "send_private_message"
     assert bundle.tool_limits == [types.ToolLimitSpec(tool_name="send_private_message", run_limit=1)]
-    assert "主动私聊" in bundle.prompt
+    assert bundle.prompt == ""
+    assert bundle.skills[0].name == "private_message"
+    assert "主动私聊" in bundle.skills[0].prompt
 
 
 def test_private_message_tool_resolves_target_name_and_sends():

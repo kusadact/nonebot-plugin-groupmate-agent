@@ -1,6 +1,6 @@
 [project]
 name = "nonebot-plugin-groupmate-agent"
-version = "3.1.4"
+version = "3.1.5"
 description = "群友 Agent NoneBot 插件"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"

@@ -167,6 +167,45 @@ def test_skill_tools_are_hidden_until_the_skill_is_active():
     assert "无需重复读取" in repeated_result["messages"][0].content
 
 
+def test_skill_loaded_in_a_batch_is_only_visible_on_the_next_agent_round():
+    @tool("load_agent_skill")
+    async def load_agent_skill(skill_name: str) -> str:
+        """加载技能。"""
+        return f"loaded {skill_name}"
+
+    @tool("weather_tool")
+    async def weather_tool() -> str:
+        """查询天气。"""
+        return "sunny"
+
+    node = graph._make_tool_node(
+        {"load_agent_skill": load_agent_skill, "weather_tool": weather_tool},
+        base_tools=[load_agent_skill],
+        tools_by_skill={"weather": [weather_tool]},
+        global_tool_limit=20,
+        named_tool_limits={},
+    )
+    state = graph.make_agent_state(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "load_agent_skill", "args": {"skill_name": "weather"}, "id": "load"},
+                    {"name": "weather_tool", "args": {}, "id": "same-round"},
+                ],
+            )
+        ],
+        "group-1",
+        "req-1",
+    )
+
+    result = asyncio.run(node(state))
+
+    assert result["active_skills"] == ["weather"]
+    assert result["messages"][0].content == "loaded weather"
+    assert "当前未启用" in result["messages"][1].content
+
+
 def test_agent_node_binds_only_tools_for_active_skills():
     @tool("base_tool")
     async def base_tool() -> str:

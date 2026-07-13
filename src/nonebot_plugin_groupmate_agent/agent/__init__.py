@@ -1380,13 +1380,7 @@ async def create_chat_agent(
     agent_skills = skill_tool_setup.skills
     base_optional_tools = skill_tool_setup.base_tools
     tools_by_skill = skill_tool_setup.tools_by_skill
-    skill_loader_tool = create_agent_skill_loader_tool(agent_skills, optional_ctx)
     optional_tool_instructions = "\n".join(bundle.prompt for bundle in optional_bundles if bundle.prompt)
-    skill_index = build_agent_skill_index(agent_skills)
-    if skill_index:
-        optional_tool_instructions = "\n".join(
-            part for part in (optional_tool_instructions, skill_index) if part.strip()
-        )
 
     stable_system_prompt = f"""你是QQ群群友「{plugin_config.bot_name}」。
 你不是助手，不承认自己是AI。
@@ -1427,12 +1421,6 @@ async def create_chat_agent(
 - 在 `search_history_context` 中禁止相对时间词：昨天、前天、本周、上周、这个月、上个月、最近等
 - 使用明确日期时间或关键词检索
 """
-    tool_mode_prompt = f"""【本轮工具与模式】
-{permission_status}
-{user_bound_tool_instruction}
-{cross_user_direct_instruction}
-{optional_tool_instructions}
-"""
     context_prompt = f"""【本轮上下文档案】
 {group_context}
 {relation_context}
@@ -1462,7 +1450,6 @@ async def create_chat_agent(
             similar_meme_tool,
             send_meme_tool,
             *base_optional_tools,
-            *([skill_loader_tool] if skill_loader_tool is not None else []),
             finish,
         ]
     elif not user_id or not user_name:
@@ -1481,7 +1468,6 @@ async def create_chat_agent(
             similar_meme_tool,
             send_meme_tool,
             *base_optional_tools,
-            *([skill_loader_tool] if skill_loader_tool is not None else []),
             finish,
         ]
     else:
@@ -1501,10 +1487,34 @@ async def create_chat_agent(
             send_meme_tool,
             relation_tool,
             *base_optional_tools,
-            *([skill_loader_tool] if skill_loader_tool is not None else []),
             finish,
         ]
 
+    existing_tool_names = {tool_item.name for tool_item in (*base_tools, *optional_tools)}
+    skill_loader_name = "load_agent_skill"
+    suffix = 2
+    while skill_loader_name in existing_tool_names:
+        skill_loader_name = f"load_agent_skill_{suffix}"
+        suffix += 1
+    skill_loader_tool = create_agent_skill_loader_tool(
+        agent_skills,
+        optional_ctx,
+        tool_name=skill_loader_name,
+    )
+    if skill_loader_tool is not None:
+        base_tools.append(skill_loader_tool)
+        skill_index = build_agent_skill_index(agent_skills, loader_name=skill_loader_name)
+        if skill_index:
+            optional_tool_instructions = "\n".join(
+                part for part in (optional_tool_instructions, skill_index) if part.strip()
+            )
+
+    tool_mode_prompt = f"""【本轮工具与模式】
+{permission_status}
+{user_bound_tool_instruction}
+{cross_user_direct_instruction}
+{optional_tool_instructions}
+"""
     tools = list(base_tools)
     known_tool_names = {tool_item.name for tool_item in tools}
     for tool_item in optional_tools:
@@ -1533,6 +1543,7 @@ async def create_chat_agent(
         system_messages,
         base_tools=base_tools,
         tools_by_skill=tools_by_skill,
+        skill_loader_name=skill_loader_name,
         tool_limits=tool_limits,
     )
     context_messages: list[BaseMessage] = []

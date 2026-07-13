@@ -324,6 +324,7 @@ def _make_tool_node(
     tools_by_skill: Mapping[str, Sequence[BaseTool]],
     global_tool_limit: int,
     named_tool_limits: dict[str, int],
+    skill_loader_name: str = "load_agent_skill",
 ) -> Any:
     async def tool_node(state: AgentState) -> dict[str, Any]:
         messages = state["messages"]
@@ -336,6 +337,14 @@ def _make_tool_node(
         tool_run_counts = dict(state.get("tool_run_counts", {}))
         called_finish = 0
         active_skills = list(state.get("active_skills", []))
+        # Tool calls in one AI response are a single model decision.  A skill
+        # loaded by one call must not make its tools executable by a later call
+        # in the same response; the model has not seen the newly bound schema
+        # or the returned skill prompt yet.  Newly activated skills take effect
+        # on the next agent round.
+        visible_tool_names = {
+            tool_item.name for tool_item in _active_tools(base_tools, tools_by_skill, active_skills)
+        }
         session_id = state["session_id"]
         request_id = state["request_id"]
         agent_ctx = _AgentContext(session_id=session_id, request_id=request_id)
@@ -364,13 +373,10 @@ def _make_tool_node(
                 results.append(ToolMessage(content=f"未知工具: {name}", tool_call_id=tool_call_id))
                 continue
 
-            visible_tool_names = {
-                tool_item.name for tool_item in _active_tools(base_tools, tools_by_skill, active_skills)
-            }
             if name not in visible_tool_names:
                 results.append(
                     ToolMessage(
-                        content=f"工具 `{name}` 当前未启用；请先调用 `load_agent_skill` 读取对应技能。",
+                        content=f"工具 `{name}` 当前未启用；请先调用 `{skill_loader_name}` 读取对应技能。",
                         tool_call_id=tool_call_id,
                     )
                 )
@@ -389,7 +395,7 @@ def _make_tool_node(
 
             raw_args = tool_call.get("args", {})
             args = raw_args if isinstance(raw_args, dict) else {}
-            if name == "load_agent_skill":
+            if name == skill_loader_name:
                 requested_skill = str(args.get("skill_name") or "").strip()
                 if requested_skill in active_skills:
                     results.append(
@@ -416,7 +422,7 @@ def _make_tool_node(
                 result = f"工具执行出错: {e}"
 
             results.append(ToolMessage(content=str(result), tool_call_id=tool_call_id))
-            if tool_succeeded and name == "load_agent_skill":
+            if tool_succeeded and name == skill_loader_name:
                 requested_skill = str(args.get("skill_name") or "").strip()
                 if requested_skill in tools_by_skill and requested_skill not in active_skills:
                     active_skills.append(requested_skill)
@@ -458,6 +464,7 @@ def build_chat_graph(
     *,
     base_tools: Sequence[BaseTool] | None = None,
     tools_by_skill: Mapping[str, Sequence[BaseTool]] | None = None,
+    skill_loader_name: str = "load_agent_skill",
     tool_limits: Sequence[GraphToolLimit] | None = None,
 ) -> Any:
     global_tool_limit, named_tool_limits = _normalize_limits(tool_limits)
@@ -480,6 +487,7 @@ def build_chat_graph(
             tools_by_name,
             base_tools=normalized_base_tools,
             tools_by_skill=normalized_tools_by_skill,
+            skill_loader_name=skill_loader_name,
             global_tool_limit=global_tool_limit,
             named_tool_limits=named_tool_limits,
         ),

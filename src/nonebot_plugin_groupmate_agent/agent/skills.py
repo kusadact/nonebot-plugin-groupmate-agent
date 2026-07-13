@@ -55,7 +55,10 @@ def normalize_agent_skills(skills: Iterable[AgentSkill]) -> list[AgentSkill]:
     return normalized
 
 
-def build_agent_skill_index(skills: Iterable[AgentSkill]) -> str:
+def build_agent_skill_index(
+    skills: Iterable[AgentSkill],
+    loader_name: str = "load_agent_skill",
+) -> str:
     normalized = normalize_agent_skills(skills)
     if not normalized:
         return ""
@@ -63,7 +66,7 @@ def build_agent_skill_index(skills: Iterable[AgentSkill]) -> str:
     lines = [f"- {skill.name}: {skill.description}" for skill in normalized]
     return (
         "【可按需读取的技能】\n"
-        "下面只列出技能索引。当前任务明显需要某项技能时，先调用 `load_agent_skill` 读取完整规则；"
+        f"下面只列出技能索引。当前任务明显需要某项技能时，先调用 `{loader_name}` 读取完整规则；"
         "不要预先读取无关技能。\n"
         + "\n".join(lines)
     )
@@ -118,12 +121,14 @@ async def resolve_agent_skill_prompt(skill: AgentSkill, ctx: OptionalToolContext
 def create_agent_skill_loader_tool(
     skills: Iterable[AgentSkill],
     ctx: OptionalToolContext,
+    *,
+    tool_name: str = "load_agent_skill",
 ):
     skill_map = {skill.name: skill for skill in normalize_agent_skills(skills)}
     if not skill_map:
         return None
 
-    @tool("load_agent_skill")
+    @tool(tool_name)
     async def load_agent_skill(skill_name: str) -> str:
         """按名称读取一项技能的完整规则，并启用该技能关联的工具。"""
 

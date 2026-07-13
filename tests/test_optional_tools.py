@@ -324,6 +324,33 @@ def test_agent_skill_loader_resolves_async_dynamic_prompt():
     assert result == "只允许查询会话 group-1"
 
 
+def test_agent_skill_loader_can_use_a_non_default_name_when_the_default_collides():
+    loader_tool = skills.create_agent_skill_loader_tool(
+        [
+            types.AgentSkill(
+                name="weather",
+                description="天气技能。",
+                prompt="天气规则",
+            )
+        ],
+        make_ctx(),
+        tool_name="load_agent_skill_2",
+    )
+
+    assert loader_tool is not None
+    assert loader_tool.name == "load_agent_skill_2"
+    assert "load_agent_skill_2" in skills.build_agent_skill_index(
+        [
+            types.AgentSkill(
+                name="weather",
+                description="天气技能。",
+                prompt="天气规则",
+            )
+        ],
+        loader_name="load_agent_skill_2",
+    )
+
+
 def test_prepare_agent_skill_tools_keeps_legacy_tools_visible_and_gates_skill_tools():
     @tool("legacy_tool")
     async def legacy_tool() -> str:

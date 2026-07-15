@@ -102,9 +102,9 @@ def resolve_reply_targets(
         return resolved
 
     if direct_target_count == 1:
-        invalid_refs = [message.target_ref for message in resolved if message.target_ref not in {None, 1}]
-        if invalid_refs:
-            raise ValueError("单目标回复的 target_ref 只能是 1")
+        # 单目标只有一个隐含目标，target_ref 对实际发送没有意义。
+        # ReplyItem 为兼容多目标 schema 仍保留了这个可选字段；即使模型误传，
+        # 也不应让一次本来可以发送的回复因为无关编号失败。
         return resolved
 
     if len(resolved) != direct_target_count:

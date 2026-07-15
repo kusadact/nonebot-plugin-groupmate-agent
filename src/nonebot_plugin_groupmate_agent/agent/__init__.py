@@ -539,6 +539,8 @@ def create_reply_tool(
         reply_description += (
             f"本轮有 {direct_target_count} 个编号目标；每条消息必须填写 target_ref，且完整覆盖所有目标编号。"
         )
+    elif direct_target_count == 1:
+        reply_description += "本轮只有一个目标，不需要填写 target_ref；如果传入则按当前唯一目标发送。"
 
     @tool("reply_user", args_schema=reply_args_schema, description=reply_description)
     async def reply_user(messages: list[ReplyItem]) -> str:

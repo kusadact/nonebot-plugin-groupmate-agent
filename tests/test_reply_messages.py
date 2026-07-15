@@ -73,6 +73,16 @@ def test_targeted_schema_requires_target_ref():
         )
 
 
+def test_single_target_ignores_extra_target_ref():
+    args = reply_messages.ReplyArgs.model_validate(
+        {"messages": [{"target_ref": 99, "content": "回复唯一目标"}]},
+    )
+
+    resolved = reply_messages.resolve_reply_targets(args.messages, direct_target_count=1)
+
+    assert [message.content for message in resolved] == ["回复唯一目标"]
+
+
 def test_targeted_messages_are_validated_and_sorted_by_ref():
     args = reply_messages.TargetedReplyArgs.model_validate(
         {
